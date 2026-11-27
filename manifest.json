@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "CSV Form Auto-Filler",
+  "version": "1.0.0",
+  "description": "Load CSV data, browse all records, inspect page fields, and auto-fill any website form by ID.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CSV Form Auto-Filler",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  }
+}

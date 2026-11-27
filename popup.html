@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Form Auto-Filler</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <div class="title-wrap">
+        <span class="logo" aria-hidden="true">⚡</span>
+        <div>
+          <div class="title-row">
+            <h1>Form Auto-Filler</h1>
+            <span id="page-fields-pill" class="page-pill hidden" title="Active page form fields detected">0 fields</span>
+          </div>
+          <p id="dataset-meta" class="meta">No CSV loaded</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="id-col-pill" class="pill hidden">ID: id</span>
+        <button id="btn-pin-window" class="btn btn-ghost btn-sm" type="button" title="Open in a stay-open window">📌 Keep Open</button>
+      </div>
+    </header>
+
+    <!-- TWO MAIN SECTIONS: 1st RANDOM FILLER, 2nd CSV IMPORT & FILL -->
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="random" type="button" role="tab" aria-selected="true">
+        <span>1. Random Data Fill</span>
+      </button>
+      <button class="tab" data-tab="csv" type="button" role="tab" aria-selected="false">
+        <span>2. CSV &amp; Fill Page</span>
+        <span id="count-badge" class="badge">0</span>
+      </button>
+    </nav>
+
+    <div id="status-banner" class="banner hidden" role="status">
+      <span id="status-text"></span>
+      <button id="btn-close-status" class="banner-close" type="button" aria-label="Dismiss">&times;</button>
+    </div>
+
+    <!-- SECTION 1 (DEFAULT): RANDOM DATA FILL BASED ON FIELD & FIELD TYPE -->
+    <section id="panel-random" class="panel active">
+      <div class="card field-block">
+        <div class="row-between">
+          <div>
+            <strong>Random Data Generator</strong>
+            <p class="hint">Auto-generates valid values by field <code>tagName</code>, <code>type</code>, <code>name</code> &amp; constraints</p>
+          </div>
+        </div>
+
+        <div class="switch-row">
+          <label class="switch-pill">
+            <input id="rnd-overwrite" type="checkbox" checked />
+            <span class="switch-ui"></span>
+            <span>Overwrite filled</span>
+          </label>
+          <label class="switch-pill">
+            <input id="rnd-include-hidden" type="checkbox" />
+            <span class="switch-ui"></span>
+            <span>Include hidden</span>
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button id="btn-random-fill" class="btn btn-primary btn-grow" type="button">🎲 Fill Page with Random Data</button>
+          <button id="btn-random-inspect" class="btn btn-secondary" type="button">👁 Preview Values</button>
+        </div>
+      </div>
+
+      <div class="card field-block random-preview-wrap">
+        <div class="row-between">
+          <strong>Generated Preview <span id="random-count" class="badge">0</span></strong>
+          <div class="record-actions">
+            <button id="btn-random-reroll-all" class="btn btn-secondary btn-sm" type="button" disabled>↻ Re-roll All</button>
+            <button id="btn-random-apply-preview" class="btn btn-primary btn-sm" type="button" disabled>✓ Apply to Page</button>
+          </div>
+        </div>
+        <div id="random-preview-list" class="random-list">
+          <div class="empty-sm">
+            Click <strong>Fill Page with Random Data</strong> to fill right away, or <strong>Preview Values</strong> to review, edit, or re-roll individual fields first.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 2: CSV IMPORT, DEFAULTS/MAPPINGS & FILL PAGE -->
+    <section id="panel-csv" class="panel">
+      <div id="csv-dropzone" class="card source-bar">
+        <div class="row-between">
+          <div class="source-label-wrap">
+            <span class="dot"></span>
+            <span class="source-title">Data Import</span>
+          </div>
+          <div class="record-actions">
+            <button id="btn-choose-file" class="btn btn-primary btn-sm" type="button">Upload File</button>
+            <button id="btn-toggle-source" class="btn btn-ghost btn-sm" type="button">More ▾</button>
+          </div>
+          <input id="csv-file-input" type="file" hidden />
+        </div>
+        <div class="drop-hint">Drag &amp; drop CSV, Excel (.xlsx/.xls), Word (.docx), PDF, JSON, or table file</div>
+
+        <div id="source-drawer" class="source-drawer hidden">
+          <div class="btn-row">
+            <button id="btn-load-sample" class="btn btn-secondary btn-sm btn-grow" type="button">Load Sample</button>
+            <button id="btn-clear-data" class="btn btn-danger btn-sm" type="button">Clear CSV</button>
+          </div>
+
+          <div class="inline-field">
+            <label for="id-column-select">ID Column</label>
+            <select id="id-column-select">
+              <option value="">Load CSV first...</option>
+            </select>
+          </div>
+
+          <textarea id="paste-csv" rows="3" placeholder="Or paste CSV, TSV, JSON, Markdown, or HTML table here..."></textarea>
+          <button id="btn-parse-paste" class="btn btn-secondary btn-sm btn-full" type="button">Parse &amp; Save Pasted Data</button>
+        </div>
+      </div>
+
+      <div class="fill-row">
+        <div id="quick-id-wrap" class="input-icon-wrap">
+          <input id="quick-id-input" type="text" autocomplete="off" placeholder="Enter or select ID to fill active page..." aria-autocomplete="list" aria-expanded="false" aria-controls="quick-id-menu" />
+          <div class="input-suffix-actions">
+            <button id="btn-clear-quick-id" class="input-clear-btn hidden" type="button" title="Clear ID" aria-label="Clear ID">&times;</button>
+            <button id="btn-toggle-id-menu" class="input-dropdown-btn" type="button" title="Show all IDs" aria-label="Show all IDs">▾</button>
+          </div>
+          <div id="quick-id-menu" class="id-dropdown hidden" role="listbox" aria-label="Available IDs"></div>
+        </div>
+        <button id="btn-quick-fill" class="btn btn-primary" type="button">⚡ Fill Page</button>
+      </div>
+
+      <div class="search-row">
+        <input id="search-input" type="search" placeholder="Search CSV rows by name, game, level, or value..." />
+        <span id="records-filter-count" class="filter-count hidden">0</span>
+      </div>
+
+      <div id="records-container" class="records-list">
+        <div class="empty">
+          No CSV loaded yet. Click <strong>Upload CSV</strong> or <strong>More ▾ → Load Sample</strong>.
+        </div>
+      </div>
+
+      <details id="config-details" class="card mapper-details">
+        <summary>
+          <span>Defaults &amp; Field Mapping <span id="config-badge" class="badge">0</span></span>
+          <span class="summary-chevron">▾</span>
+        </summary>
+        <div class="mapper-body">
+          <div class="sub-block no-border">
+            <div class="row-between">
+              <strong class="sub-title">Default Fields (Not in CSV) <span id="defaults-count" class="badge">0</span></strong>
+              <div class="record-actions">
+                <button id="btn-refresh-fields" class="btn btn-ghost btn-sm" type="button" title="Refresh active page field options">↻ Fields</button>
+                <button id="btn-fill-defaults-only" class="btn btn-secondary btn-sm" type="button">Fill Defaults Only</button>
+              </div>
+            </div>
+            <div class="default-add-row">
+              <select id="default-target-field">
+                <option value="">-- Select Page Field --</option>
+              </select>
+              <input id="default-field-value" type="text" list="default-value-suggestions" placeholder="Default value" />
+              <datalist id="default-value-suggestions"></datalist>
+              <button id="btn-add-default" class="btn btn-primary btn-sm" type="button">+ Add</button>
+            </div>
+            <ul id="defaults-list" class="chips-list"></ul>
+          </div>
+
+          <div class="sub-block">
+            <div class="row-between">
+              <strong class="sub-title">Custom CSV Mappings</strong>
+              <button id="btn-apply-citta-preset" class="btn btn-secondary btn-sm" type="button">Citta Preset</button>
+            </div>
+            <div class="map-inputs">
+              <select id="map-csv-col"></select>
+              <span class="arrow-sep">→</span>
+              <select id="map-target-field">
+                <option value="">-- Select Page Field --</option>
+              </select>
+              <button id="btn-add-mapping" class="btn btn-secondary btn-sm" type="button">+ Map</button>
+            </div>
+            <ul id="mappings-list" class="chips-list"></ul>
+          </div>
+
+          <div class="sub-block">
+            <div class="row-between">
+              <strong class="sub-title">Share Config (Defaults &amp; Mappings)</strong>
+              <div class="record-actions">
+                <button id="btn-copy-config" class="btn btn-primary btn-sm" type="button" title="Copy all default fields and mappings to share">📋 Copy Data</button>
+                <button id="btn-toggle-import-config" class="btn btn-secondary btn-sm" type="button" title="Paste shared config from another user">📥 Import</button>
+              </div>
+            </div>
+            <div id="import-config-drawer" class="import-drawer hidden">
+              <textarea id="import-config-input" rows="3" placeholder="Paste shared defaults &amp; mappings JSON here..."></textarea>
+              <div class="btn-row">
+                <button id="btn-import-config-merge" class="btn btn-primary btn-sm btn-grow" type="button">Merge with Current</button>
+                <button id="btn-import-config-replace" class="btn btn-secondary btn-sm" type="button">Replace All</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+    </section>
+  </div>
+
+  <script src="csv-parser.js"></script>
+  <script src="file-importer.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
