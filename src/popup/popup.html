@@ -9,7 +9,9 @@
   <div class="shell">
     <header class="header">
       <div class="title-wrap">
-        <span class="logo" aria-hidden="true">⚡</span>
+        <span class="logo" aria-hidden="true">
+          <img src="../../assets/logos/logo48.png" alt="" class="logo-img" />
+        </span>
         <div>
           <div class="title-row">
             <h1>Form Auto-Filler</h1>
@@ -24,7 +26,6 @@
       </div>
     </header>
 
-    <!-- TWO MAIN SECTIONS: 1st RANDOM FILLER, 2nd CSV IMPORT & FILL -->
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="random" type="button" role="tab" aria-selected="true">
         <span>1. Random Data Fill</span>
@@ -40,7 +41,7 @@
       <button id="btn-close-status" class="banner-close" type="button" aria-label="Dismiss">&times;</button>
     </div>
 
-    <!-- SECTION 1 (DEFAULT): RANDOM DATA FILL BASED ON FIELD & FIELD TYPE -->
+    <!-- Section 1 (Default): Random Data Fill -->
     <section id="panel-random" class="panel active">
       <div class="card field-block">
         <div class="row-between">
@@ -85,7 +86,7 @@
       </div>
     </section>
 
-    <!-- SECTION 2: CSV IMPORT, DEFAULTS/MAPPINGS & FILL PAGE -->
+    <!-- Section 2: Data Import, Defaults/Mappings & Fill Page -->
     <section id="panel-csv" class="panel">
       <div id="csv-dropzone" class="card source-bar">
         <div class="row-between">
@@ -99,7 +100,9 @@
           </div>
           <input id="csv-file-input" type="file" hidden />
         </div>
-        <div class="drop-hint">Drag &amp; drop CSV, Excel (.xlsx/.xls), Word (.docx), PDF, JSON, or table file</div>
+        <div class="drop-hint">
+          <strong>Drag &amp; drop</strong> CSV, Excel (.xlsx/.xls), Word (.docx), PDF, JSON here — or press <code>Ctrl+V</code> to paste
+        </div>
 
         <div id="source-drawer" class="source-drawer hidden">
           <div class="btn-row">
@@ -138,7 +141,7 @@
 
       <div id="records-container" class="records-list">
         <div class="empty">
-          No CSV loaded yet. Click <strong>Upload CSV</strong> or <strong>More ▾ → Load Sample</strong>.
+          No data loaded yet. Click <strong>Upload File</strong> or <strong>More ▾ → Load Sample</strong>.
         </div>
       </div>
 
@@ -170,7 +173,7 @@
           <div class="sub-block">
             <div class="row-between">
               <strong class="sub-title">Custom CSV Mappings</strong>
-              <button id="btn-apply-citta-preset" class="btn btn-secondary btn-sm" type="button">Citta Preset</button>
+              <button id="btn-apply-achievement-preset" class="btn btn-secondary btn-sm" type="button">Achievement Preset</button>
             </div>
             <div class="map-inputs">
               <select id="map-csv-col"></select>
@@ -204,8 +207,10 @@
     </section>
   </div>
 
-  <script src="csv-parser.js"></script>
-  <script src="file-importer.js"></script>
+  <script src="../constants/app-constants.js"></script>
+  <script src="../constants/parser-constants.js"></script>
+  <script src="../parsers/csv-parser.js"></script>
+  <script src="../parsers/file-importer.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

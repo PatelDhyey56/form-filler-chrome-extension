@@ -1,9 +1,21 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'csv_autofiller_ext_dataset_v1';
-  const DEFAULTS_STORAGE_KEY = 'csv_autofiller_ext_defaults_v1';
-  const ACTIVE_TAB_STORAGE_KEY = 'csv_autofiller_ext_active_tab_v1';
+  /* ========================================================================
+   * Constants & Configuration
+   * ======================================================================== */
+
+  const {
+    STORAGE_KEYS,
+    POPUP_ROUTES,
+    PINNED_WINDOW_SIZE,
+    LIMITS,
+    SAMPLE_CSV,
+    ACHIEVEMENT_PRESET_MAPPINGS,
+    PREVIEW_HEADER_PREFERENCE_GROUPS,
+    DATETIME_DEFAULT_KEYS,
+    TIME_DEFAULT_KEYS,
+  } = window.AppConstants;
 
   const urlParams =
     typeof window !== 'undefined' && window.location && typeof URLSearchParams === 'function'
@@ -14,37 +26,9 @@
   const queryTabOverride = urlParams ? urlParams.get('tab') : '';
   const queryActionHint = urlParams ? urlParams.get('action') : '';
 
-  const SAMPLE_CSV = [
-    'id,first_name,last_name,email,phone,department,role,join_date,country,employment_type,is_active,notes',
-    '101,Aarav,Sharma,aarav.sharma@example.com,+91-9876543210,Engineering,Senior Backend Engineer,2024-03-15,India,Full-Time,true,"Prefers TypeScript and distributed systems."',
-    '102,Maya,Patel,maya.patel@example.com,+1-415-555-0192,Product,Product Manager,2023-11-01,United States,Full-Time,true,"Leads the onboarding and checkout experience."',
-    '103,Liam,O\'Connor,liam.oconnor@example.com,+44-20-7946-0921,Design,UX Designer,2025-01-20,United Kingdom,Contract,true,"Specializes in accessible forms and design systems."',
-  ].join('\n');
-
-  const CITTA_ACHIEVEMENT_MAPPINGS = {
-    'Achevement Name': 'name',
-    'Achievement Name': 'name',
-    Name: 'name',
-    'Achievement Category': 'achievementCategoryId',
-    Game: 'game_ids',
-    Level: 'level',
-    Tier: 'level',
-    Duration: 'duration',
-    'Action Type': 'actionType',
-    'Action Perform Count': 'action_perform_count',
-    Description: 'description',
-    Confirmed: 'isActive',
-    Active: 'isActive',
-    'Reward Auto Claim': 'isRewardAutoClaim',
-    'User Specific': 'isUserSpecific',
-    'Selected Mode': 'game_mode_id',
-    'Selected Games': 'game_ids',
-    'Reward Type': 'rewardType',
-    'Reward Claim Count': 'reward_claim_count',
-    'Bonus Coin': 'reward_coins',
-    'Reward Game': 'reward_game_ids',
-    'Bet Coin': 'bet_coin',
-  };
+  /* ========================================================================
+   * State & DOM References
+   * ======================================================================== */
 
   const state = {
     headers: [],
@@ -107,7 +91,7 @@
     mapCsvCol: document.getElementById('map-csv-col'),
     mapTargetField: document.getElementById('map-target-field'),
     btnAddMapping: document.getElementById('btn-add-mapping'),
-    btnApplyCittaPreset: document.getElementById('btn-apply-citta-preset'),
+    btnApplyAchievementPreset: document.getElementById('btn-apply-achievement-preset'),
     mappingsList: document.getElementById('mappings-list'),
 
     btnCopyConfig: document.getElementById('btn-copy-config'),
@@ -127,9 +111,24 @@
     randomPreviewList: document.getElementById('random-preview-list'),
   };
 
+  let quickIdHighlightIdx = -1;
+  let quickIdFilteredList = [];
+
+  /* ========================================================================
+   * UI Feedback, Animations & Tab Switching
+   * ======================================================================== */
+
+  function restartAnimationClass(el, className) {
+    if (!el || !el.classList) return;
+    el.classList.remove(className);
+    if (typeof el.offsetWidth === 'number') {
+      void el.offsetWidth;
+    }
+    el.classList.add(className);
+  }
+
   function showStatus(type, msg) {
-    const cls =
-      type === 'import' ? 'import-success' : type === 'ok' ? 'ok' : 'err';
+    const cls = type === 'import' ? 'import-success' : type === 'ok' ? 'ok' : 'err';
     els.statusBanner.className = 'banner hidden';
     if (typeof els.statusBanner.offsetWidth === 'number') {
       void els.statusBanner.offsetWidth;
@@ -143,6 +142,15 @@
     els.statusBanner.classList.add('hidden');
   }
 
+  function flashButton(btn, tempText) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = tempText;
+    setTimeout(() => {
+      btn.textContent = prev;
+    }, LIMITS.STATUS_FLASH_MS);
+  }
+
   function switchTab(tabName, opts) {
     const targetTab = tabName === 'csv' ? 'csv' : 'random';
     els.tabs.forEach((t) => {
@@ -152,33 +160,55 @@
     });
     els.panels.forEach((p) => p.classList.toggle('active', p.id === `panel-${targetTab}`));
     if (!opts || !opts.skipPersist) {
-      Promise.resolve(chrome.storage.local.set({ [ACTIVE_TAB_STORAGE_KEY]: targetTab })).catch(() => {});
+      Promise.resolve(chrome.storage.local.set({ [STORAGE_KEYS.ACTIVE_TAB]: targetTab })).catch(() => {});
     }
   }
 
+  /* ========================================================================
+   * Storage & Config Sharing
+   * ======================================================================== */
+
   async function saveState() {
-    const payload = {
-      headers: state.headers,
-      idColumn: state.idColumn,
-      records: state.records,
-      mappings: state.mappings,
-      fileName: state.fileName,
-    };
-    await chrome.storage.local.set({ [STORAGE_KEY]: payload });
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.DATASET]: {
+        headers: state.headers,
+        idColumn: state.idColumn,
+        records: state.records,
+        mappings: state.mappings,
+        fileName: state.fileName,
+      },
+    });
   }
 
   async function saveDefaults() {
-    await chrome.storage.local.set({ [DEFAULTS_STORAGE_KEY]: state.defaultFields });
+    await chrome.storage.local.set({ [STORAGE_KEYS.DEFAULTS]: state.defaultFields });
   }
 
   function sanitizeConfigDict(obj) {
     const clean = {};
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return clean;
+    if (!obj || typeof obj !== 'object') return clean;
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        const rawKey = item.field ?? item.key ?? item.target ?? item.name;
+        const rawVal = item.value ?? item.defaultValue ?? item.val;
+        const key = String(rawKey || '').trim();
+        if (!key || key === '__proto__' || key === 'constructor' || key === 'prototype') return;
+        if (rawVal === undefined || rawVal === null || typeof rawVal === 'object') return;
+        clean[key] = String(rawVal);
+      });
+      return clean;
+    }
     for (const [k, v] of Object.entries(obj)) {
       if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
       const key = String(k || '').trim();
       if (!key || v === undefined || v === null) continue;
-      if (typeof v === 'object') continue;
+      if (typeof v === 'object') {
+        if (!Array.isArray(v) && v.value !== undefined && v.value !== null && typeof v.value !== 'object') {
+          clean[key] = String(v.value);
+        }
+        continue;
+      }
       clean[key] = String(v);
     }
     return clean;
@@ -200,7 +230,7 @@
         await navigator.clipboard.writeText(text);
         return;
       } catch (_) {
-        // Fallback to textarea copy below
+        // Fallback to textarea selection below
       }
     }
     const ta = document.createElement('textarea');
@@ -225,8 +255,7 @@
       return;
     }
     try {
-      const payload = buildShareableConfigPayload();
-      await copyTextToClipboard(JSON.stringify(payload, null, 2));
+      await copyTextToClipboard(JSON.stringify(buildShareableConfigPayload(), null, 2));
       flashButton(els.btnCopyConfig, '✓ Copied');
       showStatus('ok', `Copied ${defCount} default(s) and ${mapCount} mapping(s) to clipboard.`);
     } catch (err) {
@@ -234,31 +263,102 @@
     }
   }
 
+  function cleanPastedJsonText(rawText) {
+    let text = String(rawText || '').trim();
+    const fenceMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fenceMatch) {
+      text = fenceMatch[1].trim();
+    }
+    return text
+      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'");
+  }
+
+  function parseJsonLenient(rawText) {
+    const cleaned = cleanPastedJsonText(rawText);
+    try {
+      return JSON.parse(cleaned);
+    } catch (_) {
+      const noTrailingCommas = cleaned.replace(/,(\s*[}\]])/g, '$1');
+      return JSON.parse(noTrailingCommas);
+    }
+  }
+
   function parseSharedConfigText(rawText) {
     let parsed;
     try {
-      parsed = JSON.parse(String(rawText || '').trim());
+      parsed = parseJsonLenient(rawText);
     } catch (_) {
       throw new Error('Invalid JSON format. Paste the exact copied config text.');
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (!parsed || typeof parsed !== 'object') {
       throw new Error('Config must be a JSON object.');
     }
 
-    const hasExplicitSections =
-      Object.prototype.hasOwnProperty.call(parsed, 'defaultFields') ||
-      Object.prototype.hasOwnProperty.call(parsed, 'mappings');
-
-    if (!hasExplicitSections) {
-      throw new Error('Missing "defaultFields" or "mappings" in pasted config.');
+    if (Array.isArray(parsed)) {
+      const defaultFields = sanitizeConfigDict(parsed);
+      if (Object.keys(defaultFields).length === 0) {
+        throw new Error('No valid default fields found in pasted array.');
+      }
+      return { defaultFields, mappings: {}, hasDefaultsSection: true, hasMappingsSection: false };
     }
 
-    const nextDefaults = sanitizeConfigDict(parsed.defaultFields);
-    const nextMappings = sanitizeConfigDict(parsed.mappings);
-    if (Object.keys(nextDefaults).length === 0 && Object.keys(nextMappings).length === 0) {
+    const rawDefaults = parsed.defaultFields ?? parsed.defaults ?? parsed.default_fields;
+    const rawMappings = parsed.mappings ?? parsed.fieldMappings ?? parsed.customMappings;
+    const hasDefaultsSection = rawDefaults !== undefined;
+    const hasMappingsSection = rawMappings !== undefined;
+
+    let defaultFields;
+    let mappings;
+    if (hasDefaultsSection || hasMappingsSection) {
+      defaultFields = sanitizeConfigDict(rawDefaults);
+      mappings = sanitizeConfigDict(rawMappings);
+    } else {
+      // Support pasting a flat { "field": "defaultValue" } object directly
+      const metaKeys = new Set(['type', 'version', 'exportedAt']);
+      const flatCandidate = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (!metaKeys.has(k)) flatCandidate[k] = v;
+      }
+      defaultFields = sanitizeConfigDict(flatCandidate);
+      mappings = {};
+    }
+
+    if (Object.keys(defaultFields).length === 0 && Object.keys(mappings).length === 0) {
       throw new Error('No valid default fields or mappings found in pasted config.');
     }
-    return { defaultFields: nextDefaults, mappings: nextMappings };
+    return {
+      defaultFields,
+      mappings,
+      hasDefaultsSection: hasDefaultsSection || Object.keys(defaultFields).length > 0,
+      hasMappingsSection,
+    };
+  }
+
+  async function applyImportedConfig(imported, mode, sourceLabel) {
+    if (mode === 'replace') {
+      if (imported.hasDefaultsSection) state.defaultFields = imported.defaultFields;
+      if (imported.hasMappingsSection) state.mappings = imported.mappings;
+    } else {
+      state.defaultFields = { ...state.defaultFields, ...imported.defaultFields };
+      state.mappings = { ...state.mappings, ...imported.mappings };
+    }
+
+    await Promise.all([saveDefaults(), saveState()]);
+    renderDefaults();
+    renderMappings();
+    if (els.configDetails) els.configDetails.open = true;
+    els.importConfigInput.value = '';
+    els.importConfigDrawer.classList.add('hidden');
+
+    const defImported = Object.keys(imported.defaultFields).length;
+    const mapImported = Object.keys(imported.mappings).length;
+    const verb = mode === 'replace' ? 'Replaced with' : 'Merged';
+    const suffix = sourceLabel ? ` from ${sourceLabel}` : '';
+    showStatus('ok', `${verb} ${defImported} default(s) and ${mapImported} mapping(s)${suffix}.`);
+    if (els.statusBanner && typeof els.statusBanner.scrollIntoView === 'function') {
+      els.statusBanner.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   async function importSharedConfig(mode) {
@@ -269,52 +369,61 @@
     }
     try {
       const imported = parseSharedConfigText(raw);
-      if (mode === 'replace') {
-        state.defaultFields = imported.defaultFields;
-        state.mappings = imported.mappings;
-      } else {
-        state.defaultFields = { ...state.defaultFields, ...imported.defaultFields };
-        state.mappings = { ...state.mappings, ...imported.mappings };
-      }
-
-      await Promise.all([saveDefaults(), saveState()]);
-      renderDefaults();
-      renderMappings();
-      els.importConfigInput.value = '';
-      els.importConfigDrawer.classList.add('hidden');
-
-      const defImported = Object.keys(imported.defaultFields).length;
-      const mapImported = Object.keys(imported.mappings).length;
-      const verb = mode === 'replace' ? 'Replaced with' : 'Merged';
-      showStatus('ok', `${verb} ${defImported} default(s) and ${mapImported} mapping(s).`);
+      await applyImportedConfig(imported, mode, '');
     } catch (err) {
       showStatus('err', err.message);
+      if (els.statusBanner && typeof els.statusBanner.scrollIntoView === 'function') {
+        els.statusBanner.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }
+
+  function tryParseConfigJson(rawText) {
+    const trimmed = cleanPastedJsonText(rawText);
+    if (!trimmed.startsWith('{')) return null;
+    try {
+      const parsed = parseJsonLenient(trimmed);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      const isExplicitConfig =
+        parsed.type === 'csv-autofiller-config' ||
+        Object.prototype.hasOwnProperty.call(parsed, 'defaultFields') ||
+        Object.prototype.hasOwnProperty.call(parsed, 'defaults') ||
+        Object.prototype.hasOwnProperty.call(parsed, 'default_fields') ||
+        Object.prototype.hasOwnProperty.call(parsed, 'mappings');
+      if (!isExplicitConfig) return null;
+      return parseSharedConfigText(trimmed);
+    } catch (_) {
+      return null;
     }
   }
 
   async function loadState() {
     const stored = await chrome.storage.local.get([
-      STORAGE_KEY,
-      DEFAULTS_STORAGE_KEY,
-      ACTIVE_TAB_STORAGE_KEY,
+      STORAGE_KEYS.DATASET,
+      STORAGE_KEYS.DEFAULTS,
+      STORAGE_KEYS.ACTIVE_TAB,
     ]);
-    if (stored[DEFAULTS_STORAGE_KEY] && typeof stored[DEFAULTS_STORAGE_KEY] === 'object') {
-      state.defaultFields = stored[DEFAULTS_STORAGE_KEY];
+    if (stored[STORAGE_KEYS.DEFAULTS] && typeof stored[STORAGE_KEYS.DEFAULTS] === 'object') {
+      state.defaultFields = sanitizeConfigDict(stored[STORAGE_KEYS.DEFAULTS]);
     }
 
     const savedTab =
       queryTabOverride === 'csv' || queryTabOverride === 'random'
         ? queryTabOverride
-        : stored[ACTIVE_TAB_STORAGE_KEY];
+        : stored[STORAGE_KEYS.ACTIVE_TAB];
     if (savedTab === 'csv' || savedTab === 'random') {
       switchTab(savedTab, { skipPersist: true });
+    }
+
+    if (isPinnedWindow && typeof document !== 'undefined' && document.body && document.body.classList) {
+      document.body.classList.add('is-pinned-window');
     }
 
     if (els.btnPinWindow && isPinnedWindow) {
       els.btnPinWindow.classList.add('hidden');
     }
 
-    const data = stored[STORAGE_KEY];
+    const data = stored[STORAGE_KEYS.DATASET];
     if (data && Array.isArray(data.records)) {
       applyDataset({
         headers: data.headers || [],
@@ -329,16 +438,20 @@
     }
 
     if (isPinnedWindow && queryActionHint === 'upload') {
-      showStatus('ok', 'Stay-open mode ready — click Upload CSV or drop a .csv file below.');
+      showStatus('ok', 'Stay-open mode ready — click Upload File or drop a file below.');
     }
   }
+
+  /* ========================================================================
+   * Dataset Parsing & Import
+   * ======================================================================== */
 
   function buildPresetMappingsForHeaders(headers) {
     const preset = {};
     if (!Array.isArray(headers)) return preset;
     headers.forEach((h) => {
-      if (Object.prototype.hasOwnProperty.call(CITTA_ACHIEVEMENT_MAPPINGS, h)) {
-        preset[h] = CITTA_ACHIEVEMENT_MAPPINGS[h];
+      if (Object.prototype.hasOwnProperty.call(ACHIEVEMENT_PRESET_MAPPINGS, h)) {
+        preset[h] = ACHIEVEMENT_PRESET_MAPPINGS[h];
       }
     });
     return preset;
@@ -374,25 +487,14 @@
     renderAll();
   }
 
-  function triggerImportAnimation() {
-    if (els.countBadge && els.countBadge.classList) {
-      els.countBadge.classList.remove('badge-pop');
-      if (typeof els.countBadge.offsetWidth === 'number') {
-        void els.countBadge.offsetWidth;
-      }
-      els.countBadge.classList.add('badge-pop');
-    }
-    if (els.recordsContainer && els.recordsContainer.classList) {
-      els.recordsContainer.classList.remove('imported-flash');
-      if (typeof els.recordsContainer.offsetWidth === 'number') {
-        void els.recordsContainer.offsetWidth;
-      }
-      els.recordsContainer.classList.add('imported-flash');
-    }
-  }
-
   function applyParsedDataset(parsed, fileName) {
-    if (!parsed || !Array.isArray(parsed.headers) || parsed.headers.length === 0 || !Array.isArray(parsed.records) || parsed.records.length === 0) {
+    if (
+      !parsed ||
+      !Array.isArray(parsed.headers) ||
+      parsed.headers.length === 0 ||
+      !Array.isArray(parsed.records) ||
+      parsed.records.length === 0
+    ) {
       showStatus('err', (parsed && parsed.warnings && parsed.warnings[0]) || 'No tabular rows found in file.');
       return;
     }
@@ -406,14 +508,22 @@
     });
     els.sourceDrawer.classList.add('hidden');
     els.btnToggleSource.textContent = 'More ▾';
-    triggerImportAnimation();
-    showStatus(
-      'import',
-      `✓ Data Imported! ${parsed.records.length} record(s) from ${fileName || 'file'}.`
-    );
+    if (els.csvDropzone && els.csvDropzone.classList) {
+      els.csvDropzone.classList.remove('is-importing');
+      restartAnimationClass(els.csvDropzone, 'import-done');
+    }
+    restartAnimationClass(els.countBadge, 'badge-pop');
+    restartAnimationClass(els.recordsContainer, 'imported-flash');
+    showStatus('import', `✓ Data Imported! ${parsed.records.length} record(s) from ${fileName || 'file'}.`);
   }
 
-  function parseAndApplyCsv(rawText, fileName) {
+  async function parseAndApplyCsv(rawText, fileName) {
+    const configImport = tryParseConfigJson(rawText);
+    if (configImport) {
+      switchTab('csv');
+      await applyImportedConfig(configImport, 'merge', fileName || 'pasted config');
+      return;
+    }
     let parsed;
     if (window.FileImporter && typeof window.FileImporter.parseTextToMatrix === 'function') {
       const matrix = window.FileImporter.parseTextToMatrix(rawText);
@@ -424,20 +534,108 @@
     applyParsedDataset(parsed, fileName || 'pasted');
   }
 
+  function setImportingVisual(isImporting) {
+    if (els.csvDropzone && els.csvDropzone.classList) {
+      els.csvDropzone.classList.toggle('is-importing', isImporting);
+    }
+    if (els.btnChooseFile) {
+      els.btnChooseFile.disabled = isImporting;
+      els.btnChooseFile.textContent = isImporting ? 'Importing...' : 'Upload File';
+    }
+  }
+
   async function readCsvFile(file) {
     if (!file) return;
+    setImportingVisual(true);
     try {
+      const lowerName = String(file.name || '').toLowerCase();
+      if (lowerName.endsWith('.json') || file.type === 'application/json') {
+        const text =
+          typeof file.text === 'function'
+            ? await file.text()
+            : await new Response(file).text();
+        const configImport = tryParseConfigJson(text);
+        if (configImport) {
+          switchTab('csv');
+          await applyImportedConfig(configImport, 'merge', file.name);
+          return;
+        }
+      }
       if (window.FileImporter && typeof window.FileImporter.importFile === 'function') {
         const parsed = await window.FileImporter.importFile(file);
         applyParsedDataset(parsed, file.name);
         return;
       }
-      const reader = new FileReader();
-      reader.onload = () => parseAndApplyCsv(String(reader.result || ''), file.name);
-      reader.readAsText(file);
+      await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          parseAndApplyCsv(String(reader.result || ''), file.name);
+          resolve();
+        };
+        reader.onerror = () => reject(new Error('Could not read file.'));
+        reader.readAsText(file);
+      });
     } catch (err) {
       showStatus('err', `Could not import "${file.name}": ${err.message}`);
+    } finally {
+      setImportingVisual(false);
     }
+  }
+
+  /* ========================================================================
+   * Rendering (Header, Quick ID Combobox, Selectors, Records, Config, Random)
+   * ======================================================================== */
+
+  function normalizeColKey(header) {
+    if (window.CSVParser && typeof window.CSVParser.normalizeHeaderKey === 'function') {
+      return window.CSVParser.normalizeHeaderKey(header);
+    }
+    return String(header || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+  }
+
+  function selectPreviewHeaders(headers, idColumn) {
+    const candidates = (headers || []).filter((h) => h && h !== idColumn);
+    if (candidates.length <= 4) return candidates;
+
+    const picked = [];
+    const pickedSet = new Set();
+    const byNorm = new Map();
+    candidates.forEach((h) => {
+      const nk = normalizeColKey(h);
+      if (nk && !byNorm.has(nk)) byNorm.set(nk, h);
+    });
+
+    const hasGameCol = () => picked.some((p) => normalizeColKey(p).includes('game'));
+    const hasTierCol = () => picked.some((p) => normalizeColKey(p) === 'tier');
+
+    for (const group of PREVIEW_HEADER_PREFERENCE_GROUPS) {
+      if (picked.length >= 4) break;
+      for (const key of group) {
+        const match = byNorm.get(key);
+        if (match && !pickedSet.has(match)) {
+          if (key === 'category' && hasGameCol()) continue;
+          if (key === 'level' && hasTierCol()) continue;
+          picked.push(match);
+          pickedSet.add(match);
+          break;
+        }
+      }
+    }
+
+    for (const h of candidates) {
+      if (picked.length >= 4) break;
+      if (pickedSet.has(h)) continue;
+      const nk = normalizeColKey(h);
+      if (nk === 'achievementcategory' && hasGameCol()) continue;
+      if (nk === 'level' && hasTierCol()) continue;
+      picked.push(h);
+      pickedSet.add(h);
+    }
+
+    return picked;
   }
 
   function renderHeader() {
@@ -458,9 +656,6 @@
       els.pageFieldsPill.classList.add('hidden');
     }
   }
-
-  let quickIdHighlightIdx = -1;
-  let quickIdFilteredList = [];
 
   function syncQuickIdClearBtn() {
     if (!els.btnClearQuickId || !els.quickIdInput) return;
@@ -490,12 +685,31 @@
     hideQuickIdMenu();
   }
 
+  function moveQuickIdHighlight(delta) {
+    if (quickIdFilteredList.length === 0 || !els.quickIdMenu) return;
+    const len = quickIdFilteredList.length;
+    if (delta > 0) {
+      quickIdHighlightIdx = (quickIdHighlightIdx + 1) % len;
+    } else {
+      quickIdHighlightIdx = quickIdHighlightIdx <= 0 ? len - 1 : quickIdHighlightIdx - 1;
+    }
+    els.quickIdMenu.querySelectorAll('.id-dropdown-item').forEach((el, idx) => {
+      const active = idx === quickIdHighlightIdx;
+      el.classList.toggle('highlighted', active);
+      if (active && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
   function buildQuickIdMeta(id) {
     const rec = state.indexById[id];
     if (!rec) return '';
-    const previewCols = selectPreviewHeaders(state.headers, state.idColumn).slice(0, 2);
-    const parts = previewCols.map((h) => String(rec[h] ?? '').trim()).filter(Boolean);
-    return parts.join(' • ');
+    return selectPreviewHeaders(state.headers, state.idColumn)
+      .slice(0, 2)
+      .map((h) => String(rec[h] ?? '').trim())
+      .filter(Boolean)
+      .join(' • ');
   }
 
   function renderQuickIdMenu(showAll) {
@@ -512,29 +726,27 @@
       els.quickIdInput.setAttribute('aria-expanded', 'true');
     };
 
-    if (allIds.length === 0) {
-      quickIdFilteredList = [];
+    const appendEmpty = (text) => {
       const empty = document.createElement('div');
       empty.className = 'id-dropdown-empty';
-      empty.textContent = 'Load a file first to browse IDs.';
+      empty.textContent = text;
       els.quickIdMenu.appendChild(empty);
       openMenu();
+    };
+
+    if (allIds.length === 0) {
+      quickIdFilteredList = [];
+      appendEmpty('Load a file first to browse IDs.');
       return;
     }
 
     const currentVal = els.quickIdInput.value.trim();
     const q = showAll ? '' : currentVal.toLowerCase();
-    const matches = q
-      ? allIds.filter((id) => id.toLowerCase().includes(q))
-      : allIds;
-    quickIdFilteredList = matches.slice(0, 300);
+    const matches = q ? allIds.filter((id) => id.toLowerCase().includes(q)) : allIds;
+    quickIdFilteredList = matches.slice(0, LIMITS.MAX_QUICK_ID_OPTIONS);
 
     if (quickIdFilteredList.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'id-dropdown-empty';
-      empty.textContent = `No ID matches "${currentVal}".`;
-      els.quickIdMenu.appendChild(empty);
-      openMenu();
+      appendEmpty(`No ID matches "${currentVal}".`);
       return;
     }
 
@@ -543,7 +755,7 @@
     const leftLbl = document.createElement('span');
     leftLbl.textContent = state.idColumn || 'ID';
     const rightLbl = document.createElement('span');
-    rightLbl.textContent = `${quickIdFilteredList.length}${matches.length > 300 ? '+' : ''} option(s)`;
+    rightLbl.textContent = `${quickIdFilteredList.length}${matches.length > LIMITS.MAX_QUICK_ID_OPTIONS ? '+' : ''} option(s)`;
     head.appendChild(leftLbl);
     head.appendChild(rightLbl);
     els.quickIdMenu.appendChild(head);
@@ -600,15 +812,12 @@
     syncQuickIdClearBtn();
 
     if (state.headers.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = 'Load CSV first...';
-      els.idColumnSelect.appendChild(opt);
-
-      const mOpt = document.createElement('option');
-      mOpt.value = '';
-      mOpt.textContent = 'Load CSV first...';
-      els.mapCsvCol.appendChild(mOpt);
+      [els.idColumnSelect, els.mapCsvCol].forEach((sel) => {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'Load CSV first...';
+        sel.appendChild(opt);
+      });
       return;
     }
 
@@ -626,76 +835,12 @@
     });
   }
 
-  function normalizeColKey(header) {
-    return String(header || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '');
-  }
-
-  function selectPreviewHeaders(headers, idColumn) {
-    const candidates = (headers || []).filter((h) => h && h !== idColumn);
-    if (candidates.length <= 4) return candidates;
-
-    const preferenceGroups = [
-      ['game', 'gamename', 'selectedgames', 'games'],
-      ['duration'],
-      ['actiontype', 'action'],
-      ['tier'],
-      ['reward'],
-      ['fullname', 'name', 'title'],
-      ['firstname', 'fname'],
-      ['lastname', 'lname'],
-      ['email', 'mail'],
-      ['phone', 'mobile', 'contact'],
-      ['department', 'role', 'designation'],
-      ['category', 'type', 'status', 'active', 'confirmed'],
-      ['country', 'city', 'company'],
-      ['description', 'desc', 'notes'],
-      ['level'],
-    ];
-
-    const picked = [];
-    const pickedSet = new Set();
-    const byNorm = new Map();
-    candidates.forEach((h) => {
-      const nk = normalizeColKey(h);
-      if (nk && !byNorm.has(nk)) byNorm.set(nk, h);
-    });
-
-    for (const group of preferenceGroups) {
-      if (picked.length >= 4) break;
-      for (const key of group) {
-        const match = byNorm.get(key);
-        if (match && !pickedSet.has(match)) {
-          if (key === 'category' && picked.some((p) => normalizeColKey(p).includes('game'))) continue;
-          if (key === 'level' && picked.some((p) => normalizeColKey(p) === 'tier')) continue;
-          picked.push(match);
-          pickedSet.add(match);
-          break;
-        }
-      }
-    }
-
-    for (const h of candidates) {
-      if (picked.length >= 4) break;
-      if (pickedSet.has(h)) continue;
-      const nk = normalizeColKey(h);
-      if (nk === 'achievementcategory' && picked.some((p) => normalizeColKey(p).includes('game'))) continue;
-      if (nk === 'level' && picked.some((p) => normalizeColKey(p) === 'tier')) continue;
-      picked.push(h);
-      pickedSet.add(h);
-    }
-
-    return picked;
-  }
-
   function renderRecords() {
     els.recordsContainer.innerHTML = '';
     if (state.records.length === 0) {
       els.recordsFilterCount.classList.add('hidden');
       els.recordsContainer.innerHTML =
-        '<div class="empty">No CSV loaded yet. Click <strong>Upload CSV</strong> or <strong>More ▾ → Load Sample</strong>.</div>';
+        '<div class="empty">No data loaded yet. Click <strong>Upload File</strong> or <strong>More ▾ → Load Sample</strong>.</div>';
       return;
     }
 
@@ -714,15 +859,21 @@
     }
 
     if (filtered.length === 0) {
-      els.recordsContainer.innerHTML = `<div class="empty">No rows match "${query}".</div>`;
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'empty';
+      emptyEl.textContent = `No rows match "${query}".`;
+      els.recordsContainer.appendChild(emptyEl);
       return;
     }
 
     const previewHeaders = selectPreviewHeaders(state.headers, state.idColumn);
     const fragment = document.createDocumentFragment();
 
-    filtered.slice(0, 150).forEach((row) => {
+    filtered.slice(0, LIMITS.MAX_RENDERED_RECORDS).forEach((row, idx) => {
       const rowId = String(row[state.idColumn] ?? '').trim();
+      const expandKey = rowId || `__row_${idx}`;
+      const isExpanded = state.expandedIds.has(expandKey);
+
       const card = document.createElement('div');
       card.className = 'record-card';
 
@@ -740,13 +891,12 @@
       const toggleBtn = document.createElement('button');
       toggleBtn.type = 'button';
       toggleBtn.className = 'btn btn-ghost btn-sm';
-      const isExpanded = state.expandedIds.has(rowId);
       toggleBtn.textContent = isExpanded ? 'Hide ▴' : 'Details ▾';
       toggleBtn.addEventListener('click', () => {
-        if (state.expandedIds.has(rowId)) {
-          state.expandedIds.delete(rowId);
+        if (state.expandedIds.has(expandKey)) {
+          state.expandedIds.delete(expandKey);
         } else {
-          state.expandedIds.add(rowId);
+          state.expandedIds.add(expandKey);
         }
         renderRecords();
       });
@@ -799,8 +949,8 @@
   }
 
   function renderConfigBadge() {
-    const total = Object.keys(state.defaultFields).length + Object.keys(state.mappings).length;
     if (els.configBadge) {
+      const total = Object.keys(state.defaultFields).length + Object.keys(state.mappings).length;
       els.configBadge.textContent = String(total);
     }
   }
@@ -810,24 +960,25 @@
   }
 
   function syncDefaultValueInputType(targetText) {
-    const clean = String(targetText || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const rawTarget = String(targetText || '').trim();
+    const rawLower = rawTarget.toLowerCase();
+    const clean = normalizeColKey(rawTarget);
+
     const matchedField = state.scannedFields.find(
       (f) =>
-        getFieldReference(f).toLowerCase() === String(targetText || '').trim().toLowerCase() ||
-        (f.wireModel && f.wireModel.toLowerCase() === String(targetText || '').trim().toLowerCase()) ||
-        (f.id && f.id.toLowerCase() === String(targetText || '').trim().toLowerCase()) ||
-        (f.name && f.name.toLowerCase() === String(targetText || '').trim().toLowerCase()) ||
-        (f.label && f.label.toLowerCase().replace(/[^a-z0-9]/g, '') === clean)
+        getFieldReference(f).toLowerCase() === rawLower ||
+        (f.wireModel && f.wireModel.toLowerCase() === rawLower) ||
+        (f.id && f.id.toLowerCase() === rawLower) ||
+        (f.name && f.name.toLowerCase() === rawLower) ||
+        (f.label && normalizeColKey(f.label) === clean)
     );
 
     let nextType = 'text';
     if (matchedField && ['datetime-local', 'date', 'time'].includes(matchedField.type)) {
       nextType = matchedField.type;
-    } else if (
-      ['displayliveat', 'displayexpireat', 'displaylivedate', 'displayexpiredate', 'livedate', 'expiredate', 'expirydate', 'startdate', 'enddate'].includes(clean)
-    ) {
+    } else if (DATETIME_DEFAULT_KEYS.has(clean)) {
       nextType = 'datetime-local';
-    } else if (['starttime', 'endtime'].includes(clean)) {
+    } else if (TIME_DEFAULT_KEYS.has(clean)) {
       nextType = 'time';
     }
 
@@ -835,11 +986,7 @@
       els.defaultFieldValue.type = nextType;
     }
     els.defaultFieldValue.placeholder =
-      nextType === 'datetime-local'
-        ? 'YYYY-MM-DDTHH:mm'
-        : nextType === 'time'
-        ? 'HH:mm'
-        : 'Default value';
+      nextType === 'datetime-local' ? 'YYYY-MM-DDTHH:mm' : nextType === 'time' ? 'HH:mm' : 'Default value';
 
     if (els.defaultValueSuggestions) {
       els.defaultValueSuggestions.innerHTML = '';
@@ -878,8 +1025,7 @@
 
       const emptyOpt = document.createElement('option');
       emptyOpt.value = '';
-      emptyOpt.textContent =
-        uniqueFields.length > 0 ? '-- Select Page Field --' : '-- Open a form page --';
+      emptyOpt.textContent = uniqueFields.length > 0 ? '-- Select Page Field --' : '-- Open a form page --';
       selectEl.appendChild(emptyOpt);
 
       uniqueFields.forEach(({ ref, field }) => {
@@ -899,80 +1045,71 @@
     syncDefaultValueInputType(els.defaultTargetField.value);
   }
 
-  function renderDefaults() {
-    els.defaultsList.innerHTML = '';
-    const entries = Object.entries(state.defaultFields);
-    els.defaultsCount.textContent = String(entries.length);
-    renderConfigBadge();
-
+  function renderChipList(listEl, entries, separator, emptyMsg, deleteTitle, onDelete) {
+    listEl.innerHTML = '';
     if (entries.length === 0) {
-      els.defaultsList.innerHTML = '<li class="empty-sm">No default fields added yet.</li>';
+      listEl.innerHTML = `<li class="empty-sm">${emptyMsg}</li>`;
       return;
     }
 
-    entries.forEach(([field, val]) => {
+    const fragment = document.createDocumentFragment();
+    entries.forEach(([key, val]) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
       const c1 = document.createElement('code');
-      c1.textContent = field;
+      c1.textContent = key;
       const c2 = document.createElement('code');
       c2.textContent = val;
       label.appendChild(c1);
-      label.appendChild(document.createTextNode(' = '));
+      label.appendChild(document.createTextNode(separator));
       label.appendChild(c2);
 
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn btn-ghost btn-sm';
       delBtn.textContent = '×';
-      delBtn.title = 'Remove default field';
-      delBtn.addEventListener('click', () => {
+      delBtn.title = deleteTitle;
+      delBtn.addEventListener('click', () => onDelete(key));
+
+      li.appendChild(label);
+      li.appendChild(delBtn);
+      fragment.appendChild(li);
+    });
+    listEl.appendChild(fragment);
+  }
+
+  function renderDefaults() {
+    const entries = Object.entries(state.defaultFields);
+    els.defaultsCount.textContent = String(entries.length);
+    renderConfigBadge();
+    renderChipList(
+      els.defaultsList,
+      entries,
+      ' = ',
+      'No default fields added yet.',
+      'Remove default field',
+      (field) => {
         delete state.defaultFields[field];
         saveDefaults();
         renderDefaults();
-      });
-
-      li.appendChild(label);
-      li.appendChild(delBtn);
-      els.defaultsList.appendChild(li);
-    });
+      }
+    );
   }
 
   function renderMappings() {
-    els.mappingsList.innerHTML = '';
     renderConfigBadge();
-    const entries = Object.entries(state.mappings);
-    if (entries.length === 0) {
-      els.mappingsList.innerHTML = '<li class="empty-sm">No custom mappings added.</li>';
-      return;
-    }
-
-    entries.forEach(([csvCol, target]) => {
-      const li = document.createElement('li');
-      const label = document.createElement('span');
-      const c1 = document.createElement('code');
-      c1.textContent = csvCol;
-      const c2 = document.createElement('code');
-      c2.textContent = target;
-      label.appendChild(c1);
-      label.appendChild(document.createTextNode(' → '));
-      label.appendChild(c2);
-
-      const delBtn = document.createElement('button');
-      delBtn.type = 'button';
-      delBtn.className = 'btn btn-ghost btn-sm';
-      delBtn.textContent = '×';
-      delBtn.title = 'Remove mapping';
-      delBtn.addEventListener('click', () => {
+    renderChipList(
+      els.mappingsList,
+      Object.entries(state.mappings),
+      ' → ',
+      'No custom mappings added.',
+      'Remove mapping',
+      (csvCol) => {
         delete state.mappings[csvCol];
         saveState();
         renderMappings();
-      });
-
-      li.appendChild(label);
-      li.appendChild(delBtn);
-      els.mappingsList.appendChild(li);
-    });
+      }
+    );
   }
 
   function renderRandomPreview() {
@@ -1057,13 +1194,17 @@
     renderRandomPreview();
   }
 
+  /* ========================================================================
+   * Active Tab Scripting & Form Filling
+   * ======================================================================== */
+
   async function getActiveTab() {
     if (isPinnedWindow && pinnedTabId && chrome.tabs && typeof chrome.tabs.get === 'function') {
       try {
         const specific = await chrome.tabs.get(pinnedTabId);
         if (specific && specific.id) return specific;
       } catch (_) {
-        // Fallback to active tab in normal browser window below
+        // Fallback to active tab in normal browser window
       }
     }
     if (isPinnedWindow) {
@@ -1096,14 +1237,14 @@
     });
     if (targetTabId) params.set('tabId', targetTabId);
     if (actionHint) params.set('action', actionHint);
-    const url = chrome.runtime && typeof chrome.runtime.getURL === 'function'
-      ? chrome.runtime.getURL(`popup.html?${params.toString()}`)
-      : `popup.html?${params.toString()}`;
+    const route = `${POPUP_ROUTES.POPUP_HTML}?${params.toString()}`;
+    const url =
+      chrome.runtime && typeof chrome.runtime.getURL === 'function' ? chrome.runtime.getURL(route) : route;
     await chrome.windows.create({
       url,
       type: 'popup',
-      width: 496,
-      height: 640,
+      width: PINNED_WINDOW_SIZE.WIDTH,
+      height: PINNED_WINDOW_SIZE.HEIGHT,
     });
     return true;
   }
@@ -1111,7 +1252,7 @@
   async function ensureContentFillerInjected(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['content-filler.js'],
+      files: POPUP_ROUTES.CONTENT_SCRIPTS,
     });
   }
 
@@ -1142,13 +1283,40 @@
     }
   }
 
-  function flashButton(btn, tempText) {
-    if (!btn) return;
-    const prev = btn.textContent;
-    btn.textContent = tempText;
-    setTimeout(() => {
-      btn.textContent = prev;
-    }, 1200);
+  function mergeFrameFillResults(results, totals) {
+    const acc = totals || { filledCount: 0, totalFields: 0 };
+    (results || []).forEach((item) => {
+      const r = item && item.result ? item.result : { filledCount: 0, totalFields: 0 };
+      acc.filledCount += r.filledCount || 0;
+      acc.totalFields = Math.max(acc.totalFields, r.totalFields || 0);
+    });
+    return acc;
+  }
+
+  function mergeFrameArrayResults(results) {
+    const merged = [];
+    (results || []).forEach((item) => {
+      if (Array.isArray(item && item.result)) {
+        merged.push(...item.result);
+      }
+    });
+    return merged;
+  }
+
+  async function runSelect2FollowUpRounds(tabId, followUpFunc, args, totals, waitMs) {
+    let syncedCount = await syncSelect2InMainWorld(tabId);
+    for (let round = 0; round < 2 && syncedCount > 0; round += 1) {
+      if (waitMs > 0) {
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+      const followResults = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: followUpFunc,
+        args,
+      });
+      mergeFrameFillResults(followResults, totals);
+      syncedCount = await syncSelect2InMainWorld(tabId);
+    }
   }
 
   async function fillActiveTabWithRecord(record, idLabel, triggerBtn) {
@@ -1165,40 +1333,23 @@
         args: [record, state.mappings, state.defaultFields],
       });
 
-      const totals = results.reduce(
-        (acc, item) => {
-          const r = item && item.result ? item.result : { filledCount: 0, totalFields: 0 };
-          acc.filledCount += r.filledCount || 0;
-          acc.totalFields = Math.max(acc.totalFields, r.totalFields || 0);
-          return acc;
+      const totals = mergeFrameFillResults(results);
+      await runSelect2FollowUpRounds(
+        tab.id,
+        (rec, mappings, defaults) => {
+          if (!window.__CSV_EXTENSION_FILLER__) return { filledCount: 0, totalFields: 0 };
+          return window.__CSV_EXTENSION_FILLER__.fillPage(rec, mappings, defaults, {
+            onlyEmpty: true,
+            waitForAsync: true,
+          });
         },
-        { filledCount: 0, totalFields: 0 }
+        [record, state.mappings, state.defaultFields],
+        totals,
+        LIMITS.SELECT2_FOLLOWUP_DELAY_MS
       );
 
-      let syncedCount = await syncSelect2InMainWorld(tab.id);
-      for (let round = 0; round < 2 && syncedCount > 0; round += 1) {
-        await new Promise((r) => setTimeout(r, 280));
-        const followResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: true },
-          func: (rec, mappings, defaults) => {
-            if (!window.__CSV_EXTENSION_FILLER__) return { filledCount: 0, totalFields: 0 };
-            return window.__CSV_EXTENSION_FILLER__.fillPage(rec, mappings, defaults, { onlyEmpty: true });
-          },
-          args: [record, state.mappings, state.defaultFields],
-        });
-        followResults.forEach((item) => {
-          const r = item && item.result ? item.result : { filledCount: 0, totalFields: 0 };
-          totals.filledCount += r.filledCount || 0;
-          totals.totalFields = Math.max(totals.totalFields, r.totalFields || 0);
-        });
-        syncedCount = await syncSelect2InMainWorld(tab.id);
-      }
-
       if (totals.filledCount === 0) {
-        showStatus(
-          'err',
-          `Found ${totals.totalFields} field(s), filled 0. Check "Defaults & Field Mapping" below.`
-        );
+        showStatus('err', `Found ${totals.totalFields} field(s), filled 0. Check "Defaults & Field Mapping" below.`);
       } else {
         flashButton(triggerBtn, '✓ Filled');
         showStatus('ok', `Filled ${totals.filledCount} field(s) on active page for "${idLabel}".`);
@@ -1217,9 +1368,7 @@
     let record = state.indexById[id];
     if (!record) {
       const lower = id.toLowerCase();
-      record = state.records.find(
-        (r) => String(r[state.idColumn] ?? '').trim().toLowerCase() === lower
-      );
+      record = state.records.find((r) => String(r[state.idColumn] ?? '').trim().toLowerCase() === lower);
     }
     if (!record) {
       showStatus('err', `No record found for ${state.idColumn || 'ID'} "${id}".`);
@@ -1236,24 +1385,14 @@
 
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        func: () => {
-          if (!window.__CSV_EXTENSION_FILLER__) return [];
-          return window.__CSV_EXTENSION_FILLER__.scanFields();
-        },
+        func: () => (window.__CSV_EXTENSION_FILLER__ ? window.__CSV_EXTENSION_FILLER__.scanFields() : []),
       });
 
-      const merged = [];
-      results.forEach((item) => {
-        if (Array.isArray(item && item.result)) {
-          merged.push(...item.result);
-        }
-      });
-
-      state.scannedFields = merged;
+      state.scannedFields = mergeFrameArrayResults(results);
       renderHeader();
       renderTargetFieldSelects();
       if (!silent) {
-        showStatus('ok', `Refreshed active page fields (${merged.length} found).`);
+        showStatus('ok', `Refreshed active page fields (${state.scannedFields.length} found).`);
       }
     } catch (err) {
       if (!silent) {
@@ -1270,23 +1409,14 @@
 
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        func: (incHidden) => {
-          if (!window.__CSV_EXTENSION_FILLER__) return [];
-          return window.__CSV_EXTENSION_FILLER__.inspectForRandom(incHidden);
-        },
+        func: (incHidden) =>
+          window.__CSV_EXTENSION_FILLER__ ? window.__CSV_EXTENSION_FILLER__.inspectForRandom(incHidden) : [],
         args: [includeHidden],
       });
 
-      const merged = [];
-      results.forEach((item) => {
-        if (Array.isArray(item && item.result)) {
-          merged.push(...item.result);
-        }
-      });
-
-      state.randomPreviewFields = merged;
+      state.randomPreviewFields = mergeFrameArrayResults(results);
       renderRandomPreview();
-      showStatus('ok', `Generated random preview for ${merged.length} field(s) by tagName & type.`);
+      showStatus('ok', `Generated random preview for ${state.randomPreviewFields.length} field(s) by tagName & type.`);
     } catch (err) {
       showStatus('err', `Cannot preview this tab: ${err.message}`);
     }
@@ -1300,14 +1430,11 @@
       await ensureContentFillerInjected(tab.id);
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: false },
-        func: (descriptor) => {
-          if (!window.__CSV_EXTENSION_FILLER__) return '';
-          return window.__CSV_EXTENSION_FILLER__.generateRandomValue(descriptor);
-        },
+        func: (descriptor) =>
+          window.__CSV_EXTENSION_FILLER__ ? window.__CSV_EXTENSION_FILLER__.generateRandomValue(descriptor) : '',
         args: [item],
       });
-      const nextVal = results && results[0] ? results[0].result : '';
-      state.randomPreviewFields[index].randomValue = nextVal;
+      state.randomPreviewFields[index].randomValue = results && results[0] ? results[0].result : '';
       renderRandomPreview();
     } catch (err) {
       showStatus('err', `Could not re-roll field: ${err.message}`);
@@ -1335,40 +1462,24 @@
 
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        func: (randomOpts) => {
-          if (!window.__CSV_EXTENSION_FILLER__) return { filledCount: 0, totalFields: 0 };
-          return window.__CSV_EXTENSION_FILLER__.fillPageRandom(randomOpts);
-        },
+        func: (randomOpts) =>
+          window.__CSV_EXTENSION_FILLER__
+            ? window.__CSV_EXTENSION_FILLER__.fillPageRandom(randomOpts)
+            : { filledCount: 0, totalFields: 0 },
         args: [opts],
       });
 
-      const totals = results.reduce(
-        (acc, item) => {
-          const r = item && item.result ? item.result : { filledCount: 0, totalFields: 0 };
-          acc.filledCount += r.filledCount || 0;
-          acc.totalFields = Math.max(acc.totalFields, r.totalFields || 0);
-          return acc;
-        },
-        { filledCount: 0, totalFields: 0 }
+      const totals = mergeFrameFillResults(results);
+      await runSelect2FollowUpRounds(
+        tab.id,
+        (randomOpts) =>
+          window.__CSV_EXTENSION_FILLER__
+            ? window.__CSV_EXTENSION_FILLER__.sweepEmptyFieldsRandom(randomOpts)
+            : { filledCount: 0, totalFields: 0 },
+        [opts],
+        totals,
+        0
       );
-
-      let syncedCount = await syncSelect2InMainWorld(tab.id);
-      for (let round = 0; round < 2 && syncedCount > 0; round += 1) {
-        const sweepResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: true },
-          func: (randomOpts) => {
-            if (!window.__CSV_EXTENSION_FILLER__) return { filledCount: 0, totalFields: 0 };
-            return window.__CSV_EXTENSION_FILLER__.sweepEmptyFieldsRandom(randomOpts);
-          },
-          args: [opts],
-        });
-        sweepResults.forEach((item) => {
-          const r = item && item.result ? item.result : { filledCount: 0, totalFields: 0 };
-          totals.filledCount += r.filledCount || 0;
-          totals.totalFields = Math.max(totals.totalFields, r.totalFields || 0);
-        });
-        syncedCount = await syncSelect2InMainWorld(tab.id);
-      }
 
       if (totals.filledCount === 0) {
         showStatus('err', `Found ${totals.totalFields} field(s), filled 0.`);
@@ -1380,6 +1491,10 @@
       showStatus('err', `Cannot random-fill this tab: ${err.message}`);
     }
   }
+
+  /* ========================================================================
+   * Event Binding & Initialization
+   * ======================================================================== */
 
   function bindEvents() {
     els.btnCloseStatus.addEventListener('click', hideStatus);
@@ -1400,50 +1515,23 @@
       hideQuickIdMenu();
       fillByTypedId();
     });
-    els.quickIdInput.addEventListener('focus', () => {
-      renderQuickIdMenu(true);
-    });
-    els.quickIdInput.addEventListener('click', () => {
-      renderQuickIdMenu(true);
-    });
+    els.quickIdInput.addEventListener('focus', () => renderQuickIdMenu(true));
+    els.quickIdInput.addEventListener('click', () => renderQuickIdMenu(true));
     els.quickIdInput.addEventListener('input', () => {
       syncQuickIdClearBtn();
       renderQuickIdMenu(false);
     });
     els.quickIdInput.addEventListener('keydown', (e) => {
       const isMenuOpen = els.quickIdMenu && !els.quickIdMenu.classList.contains('hidden');
-      if (e.key === 'ArrowDown' && isMenuOpen && quickIdFilteredList.length > 0) {
+      if (e.key === 'ArrowDown' && isMenuOpen) {
         e.preventDefault();
-        quickIdHighlightIdx = (quickIdHighlightIdx + 1) % quickIdFilteredList.length;
-        const items = els.quickIdMenu.querySelectorAll('.id-dropdown-item');
-        items.forEach((el, idx) => {
-          const active = idx === quickIdHighlightIdx;
-          el.classList.toggle('highlighted', active);
-          if (active && typeof el.scrollIntoView === 'function') {
-            el.scrollIntoView({ block: 'nearest' });
-          }
-        });
-        return;
-      }
-      if (e.key === 'ArrowUp' && isMenuOpen && quickIdFilteredList.length > 0) {
+        moveQuickIdHighlight(1);
+      } else if (e.key === 'ArrowUp' && isMenuOpen) {
         e.preventDefault();
-        quickIdHighlightIdx =
-          quickIdHighlightIdx <= 0 ? quickIdFilteredList.length - 1 : quickIdHighlightIdx - 1;
-        const items = els.quickIdMenu.querySelectorAll('.id-dropdown-item');
-        items.forEach((el, idx) => {
-          const active = idx === quickIdHighlightIdx;
-          el.classList.toggle('highlighted', active);
-          if (active && typeof el.scrollIntoView === 'function') {
-            el.scrollIntoView({ block: 'nearest' });
-          }
-        });
-        return;
-      }
-      if (e.key === 'Escape') {
+        moveQuickIdHighlight(-1);
+      } else if (e.key === 'Escape') {
         hideQuickIdMenu();
-        return;
-      }
-      if (e.key === 'Enter') {
+      } else if (e.key === 'Enter') {
         e.preventDefault();
         if (isMenuOpen && quickIdHighlightIdx >= 0 && quickIdFilteredList[quickIdHighlightIdx]) {
           selectQuickIdValue(quickIdFilteredList[quickIdHighlightIdx]);
@@ -1453,6 +1541,7 @@
         }
       }
     });
+
     if (els.btnClearQuickId) {
       els.btnClearQuickId.addEventListener('click', () => {
         els.quickIdInput.value = '';
@@ -1462,9 +1551,7 @@
       });
     }
     if (els.btnToggleIdMenu) {
-      els.btnToggleIdMenu.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-      });
+      els.btnToggleIdMenu.addEventListener('mousedown', (e) => e.preventDefault());
       els.btnToggleIdMenu.addEventListener('click', () => {
         const isOpen = els.quickIdMenu && !els.quickIdMenu.classList.contains('hidden');
         if (isOpen) {
@@ -1485,13 +1572,9 @@
 
     els.searchInput.addEventListener('input', renderRecords);
 
-    els.btnChooseFile.addEventListener('click', () => {
-      els.csvFileInput.click();
-    });
+    els.btnChooseFile.addEventListener('click', () => els.csvFileInput.click());
     if (els.btnPinWindow) {
-      els.btnPinWindow.addEventListener('click', () => {
-        openPinnedWindow('');
-      });
+      els.btnPinWindow.addEventListener('click', () => openPinnedWindow(''));
     }
     els.csvFileInput.addEventListener('change', () => {
       const file = els.csvFileInput.files && els.csvFileInput.files[0];
@@ -1500,37 +1583,91 @@
       els.csvFileInput.value = '';
     });
 
-    const handleDragOver = (e) => {
-      e.preventDefault();
-      if (els.csvDropzone) els.csvDropzone.classList.add('drag-over');
-    };
-    const handleDragLeave = (e) => {
-      if (!els.csvDropzone) return;
-      if (!els.csvDropzone.contains(e.relatedTarget)) {
-        els.csvDropzone.classList.remove('drag-over');
+    let dragDepth = 0;
+    const setDragActive = (active) => {
+      if (els.csvDropzone && els.csvDropzone.classList) {
+        els.csvDropzone.classList.toggle('drag-over', active);
+      }
+      if (typeof document !== 'undefined' && document.body && document.body.classList) {
+        document.body.classList.toggle('body-drag-active', active);
       }
     };
-    const handleDrop = (e) => {
+
+    const handleDropFile = (e) => {
       e.preventDefault();
-      if (els.csvDropzone) els.csvDropzone.classList.remove('drag-over');
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+      dragDepth = 0;
+      setDragActive(false);
       const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       if (file) {
+        switchTab('csv');
         readCsvFile(file);
       }
     };
+
     if (els.csvDropzone) {
-      els.csvDropzone.addEventListener('dragenter', handleDragOver);
-      els.csvDropzone.addEventListener('dragover', handleDragOver);
-      els.csvDropzone.addEventListener('dragleave', handleDragLeave);
-      els.csvDropzone.addEventListener('drop', handleDrop);
-    }
-    if (typeof document !== 'undefined' && document.body && typeof document.body.addEventListener === 'function') {
-      document.body.addEventListener('dragover', (e) => e.preventDefault());
-      document.body.addEventListener('drop', (e) => {
+      els.csvDropzone.addEventListener('dragenter', (e) => {
         e.preventDefault();
-        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        setDragActive(true);
+      });
+      els.csvDropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        setDragActive(true);
+      });
+      els.csvDropzone.addEventListener('dragleave', (e) => {
+        if (!els.csvDropzone.contains(e.relatedTarget)) {
+          setDragActive(false);
+        }
+      });
+      els.csvDropzone.addEventListener('drop', handleDropFile);
+    }
+
+    if (typeof document !== 'undefined' && document.body && typeof document.body.addEventListener === 'function') {
+      document.body.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        dragDepth += 1;
+        setDragActive(true);
+      });
+      document.body.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        setDragActive(true);
+      });
+      document.body.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) setDragActive(false);
+      });
+      document.body.addEventListener('drop', handleDropFile);
+    }
+
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('paste', (e) => {
+        const target = e.target;
+        const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || (target && target.isContentEditable)) {
+          return;
+        }
+        const clip = e.clipboardData;
+        if (!clip) return;
+        const file = clip.files && clip.files[0];
         if (file) {
+          e.preventDefault();
+          switchTab('csv');
           readCsvFile(file);
+          return;
+        }
+        const text = typeof clip.getData === 'function' ? clip.getData('text/plain') || clip.getData('text') : '';
+        if (
+          text &&
+          (text.includes('\n') ||
+            text.includes('\t') ||
+            text.trim().startsWith('[') ||
+            text.trim().startsWith('{') ||
+            /<table\b/i.test(text))
+        ) {
+          e.preventDefault();
+          switchTab('csv');
+          parseAndApplyCsv(text, 'clipboard');
         }
       });
     }
@@ -1588,18 +1725,22 @@
       showStatus('ok', `Mapped "${col}" → "${target}".`);
     });
 
-    els.btnApplyCittaPreset.addEventListener('click', () => {
+    els.btnApplyAchievementPreset.addEventListener('click', () => {
       const preset = buildPresetMappingsForHeaders(state.headers);
-      state.mappings = Object.keys(preset).length > 0 ? { ...state.mappings, ...preset } : { ...CITTA_ACHIEVEMENT_MAPPINGS };
+      state.mappings =
+        Object.keys(preset).length > 0 ? { ...state.mappings, ...preset } : { ...ACHIEVEMENT_PRESET_MAPPINGS };
       saveState();
       renderMappings();
-      showStatus('ok', `Applied Citta Achievement mappings (${Object.keys(state.mappings).length} total).`);
+      showStatus('ok', `Applied Achievement preset mappings (${Object.keys(state.mappings).length} total).`);
     });
 
     els.btnCopyConfig.addEventListener('click', copyCurrentConfig);
     els.btnToggleImportConfig.addEventListener('click', () => {
       const isHidden = els.importConfigDrawer.classList.toggle('hidden');
       if (!isHidden) {
+        if (typeof els.importConfigDrawer.scrollIntoView === 'function') {
+          els.importConfigDrawer.scrollIntoView({ block: 'nearest' });
+        }
         els.importConfigInput.focus();
       }
     });
@@ -1625,7 +1766,6 @@
     els.defaultTargetField.addEventListener('change', () => {
       syncDefaultValueInputType(els.defaultTargetField.value);
     });
-
     els.btnAddDefault.addEventListener('click', addDefaultEntry);
     els.defaultFieldValue.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {

@@ -1,31 +1,17 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../constants/parser-constants'));
   } else {
-    root.CSVParser = factory();
+    root.CSVParser = factory(root.ParserConstants);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (ParserConstants) {
   'use strict';
 
-  const ID_CANDIDATES = [
-    'id',
-    'record_id',
-    'recordid',
-    'user_id',
-    'userid',
-    'customer_id',
-    'customerid',
-    'emp_id',
-    'empid',
-    'employee_id',
-    'student_id',
-    'order_id',
-    'code',
-    'key',
-    'achievementname',
-    'achevementname',
-  ];
+  const { CSV_DELIMITERS, ID_CANDIDATES, PARSER_MESSAGES } = ParserConstants;
 
+  /**
+   * Normalize a header or identifier string for case-insensitive matching.
+   */
   function normalizeHeaderKey(value) {
     return String(value || '')
       .trim()
@@ -37,7 +23,10 @@
    * Detect delimiter from the first non-empty line (comma, semicolon, or tab).
    */
   function detectDelimiter(text) {
-    const firstLine = text.split(/\r?\n/).find((line) => line.trim().length > 0) || '';
+    const firstLine =
+      String(text || '')
+        .split(/\r?\n/)
+        .find((line) => line.trim().length > 0) || '';
     const counts = { ',': 0, ';': 0, '\t': 0 };
     let inQuotes = false;
 
@@ -55,14 +44,14 @@
     }
 
     let best = ',';
-    let bestCount = -1;
-    for (const delim of [',', ';', '\t']) {
+    let bestCount = 0;
+    for (const delim of CSV_DELIMITERS) {
       if (counts[delim] > bestCount) {
         bestCount = counts[delim];
         best = delim;
       }
     }
-    return bestCount > 0 ? best : ',';
+    return best;
   }
 
   /**
@@ -75,6 +64,13 @@
     let currentRow = [];
     let currentField = '';
     let inQuotes = false;
+
+    const commitRow = () => {
+      currentRow.push(currentField);
+      rows.push(currentRow);
+      currentRow = [];
+      currentField = '';
+    };
 
     for (let i = 0; i < cleanText.length; i += 1) {
       const ch = cleanText[i];
@@ -99,31 +95,25 @@
         currentRow.push(currentField);
         currentField = '';
       } else if (ch === '\r') {
-        if (cleanText[i + 1] === '\n') {
-          i += 1;
-        }
-        currentRow.push(currentField);
-        rows.push(currentRow);
-        currentRow = [];
-        currentField = '';
+        if (cleanText[i + 1] === '\n') i += 1;
+        commitRow();
       } else if (ch === '\n') {
-        currentRow.push(currentField);
-        rows.push(currentRow);
-        currentRow = [];
-        currentField = '';
+        commitRow();
       } else {
         currentField += ch;
       }
     }
 
     if (currentField.length > 0 || currentRow.length > 0) {
-      currentRow.push(currentField);
-      rows.push(currentRow);
+      commitRow();
     }
 
     return rows.filter((row) => row.some((cell) => String(cell).trim() !== ''));
   }
 
+  /**
+   * Pick the most likely ID column from parsed headers.
+   */
   function detectIdColumn(headers) {
     if (!headers || headers.length === 0) return '';
     for (const candidate of ID_CANDIDATES) {
@@ -133,6 +123,9 @@
     return headers[0];
   }
 
+  /**
+   * Ensure all column headers are non-empty and unique.
+   */
   function deduplicateHeaders(rawHeaders) {
     const seen = new Map();
     return rawHeaders.map((header, idx) => {
@@ -144,55 +137,13 @@
   }
 
   /**
-   * Parse CSV string into { headers, idColumn, records, indexById, warnings }.
+   * Build a lookup map of trimmed ID values to their latest matching record.
    */
-  function parseCSV(rawText, preferredIdColumn) {
-    const matrix = parseCSVRows(rawText);
-    if (matrix.length === 0) {
-      return {
-        headers: [],
-        idColumn: '',
-        records: [],
-        indexById: {},
-        warnings: ['CSV file is empty.'],
-      };
-    }
-
-    const headers = deduplicateHeaders(matrix[0]);
-    const idColumn =
-      preferredIdColumn && headers.includes(preferredIdColumn)
-        ? preferredIdColumn
-        : detectIdColumn(headers);
-
-    const records = [];
-    const warnings = [];
-
-    for (let r = 1; r < matrix.length; r += 1) {
-      const rowValues = matrix[r];
-      const record = {};
-      for (let c = 0; c < headers.length; c += 1) {
-        record[headers[c]] = rowValues[c] !== undefined ? String(rowValues[c]).trim() : '';
-      }
-      records.push(record);
-    }
-
-    const indexResult = buildIndex(records, idColumn);
-    warnings.push(...indexResult.warnings);
-
-    return {
-      headers,
-      idColumn,
-      records,
-      indexById: indexResult.indexById,
-      warnings,
-    };
-  }
-
   function buildIndex(records, idColumn) {
     const indexById = {};
     const warnings = [];
-    let emptyCount = 0;
     const duplicates = [];
+    let emptyCount = 0;
 
     for (let i = 0; i < records.length; i += 1) {
       const record = records[i];
@@ -221,10 +172,52 @@
     return { indexById, warnings };
   }
 
+  /**
+   * Parse CSV text into { headers, idColumn, records, indexById, warnings }.
+   */
+  function parseCSV(rawText, preferredIdColumn) {
+    const matrix = parseCSVRows(rawText);
+    if (matrix.length === 0) {
+      return {
+        headers: [],
+        idColumn: '',
+        records: [],
+        indexById: {},
+        warnings: [PARSER_MESSAGES.EMPTY_CSV],
+      };
+    }
+
+    const headers = deduplicateHeaders(matrix[0]);
+    const idColumn =
+      preferredIdColumn && headers.includes(preferredIdColumn)
+        ? preferredIdColumn
+        : detectIdColumn(headers);
+
+    const records = [];
+    for (let r = 1; r < matrix.length; r += 1) {
+      const rowValues = matrix[r];
+      const record = {};
+      for (let c = 0; c < headers.length; c += 1) {
+        record[headers[c]] = rowValues[c] !== undefined ? String(rowValues[c]).trim() : '';
+      }
+      records.push(record);
+    }
+
+    const indexResult = buildIndex(records, idColumn);
+    return {
+      headers,
+      idColumn,
+      records,
+      indexById: indexResult.indexById,
+      warnings: indexResult.warnings,
+    };
+  }
+
   return {
     parseCSV,
     parseCSVRows,
     detectIdColumn,
+    deduplicateHeaders,
     buildIndex,
     normalizeHeaderKey,
   };

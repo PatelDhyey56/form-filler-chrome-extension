@@ -1,11 +1,17 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./csv-parser'));
+    module.exports = factory(require('./csv-parser'), require('../constants/parser-constants'));
   } else {
-    root.FileImporter = factory(root.CSVParser);
+    root.FileImporter = factory(root.CSVParser, root.ParserConstants);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (CSVParser) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (CSVParser, ParserConstants) {
   'use strict';
+
+  const { JSON_COLLECTION_KEYS, PDF_ESCAPE_MAP, FILE_SIGNATURES, PARSER_MESSAGES } = ParserConstants;
+
+  /* ========================================================================
+   * XML, Encoding & Binary Helpers
+   * ======================================================================== */
 
   function decodeXmlEntities(str) {
     return String(str || '')
@@ -28,13 +34,22 @@
     if (!attrStr) return '';
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const rx = new RegExp(`(?:^|\\s)(?:[a-zA-Z0-9_-]+:)?${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i');
-    const m = attrStr.match(rx);
-    return m ? decodeXmlEntities(m[1] !== undefined ? m[1] : m[2] || '') : '';
+    const match = attrStr.match(rx);
+    return match ? decodeXmlEntities(match[1] !== undefined ? match[1] : match[2] || '') : '';
+  }
+
+  function extractJoinedTagText(xml, tagName) {
+    const rx = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi');
+    const parts = [];
+    let match;
+    while ((match = rx.exec(xml)) !== null) {
+      parts.push(decodeXmlEntities(match[1]));
+    }
+    return parts.join('');
   }
 
   function decodeBytes(bytes) {
     if (!bytes || bytes.length === 0) return '';
-    // Check UTF-16 BOM
     if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
       return new TextDecoder('utf-16le').decode(bytes.subarray(2));
     }
@@ -47,6 +62,14 @@
     return new TextDecoder('utf-8').decode(bytes);
   }
 
+  function startsWithSignature(bytes, signature) {
+    if (!bytes || bytes.length < signature.length) return false;
+    for (let i = 0; i < signature.length; i += 1) {
+      if (bytes[i] !== signature[i]) return false;
+    }
+    return true;
+  }
+
   async function inflateBytes(compressed, format) {
     if (typeof DecompressionStream === 'function') {
       const ds = new DecompressionStream(format);
@@ -56,10 +79,9 @@
     }
     if (typeof require === 'function') {
       const zlib = require('zlib');
-      if (format === 'deflate-raw') {
-        return new Uint8Array(zlib.inflateRawSync(Buffer.from(compressed)));
-      }
-      return new Uint8Array(zlib.inflateSync(Buffer.from(compressed)));
+      const input = Buffer.from(compressed);
+      const out = format === 'deflate-raw' ? zlib.inflateRawSync(input) : zlib.inflateSync(input);
+      return new Uint8Array(out);
     }
     throw new Error('DecompressionStream is not available in this environment.');
   }
@@ -78,20 +100,17 @@
     );
   }
 
-  /**
-   * Read ZIP entries via Central Directory so files with data descriptors (Excel/Word/ODS) work reliably.
-   */
+  /* ========================================================================
+   * ZIP Archive Reader (Central Directory)
+   * ======================================================================== */
+
   async function extractZipEntries(bytes) {
     const entries = new Map();
     const minEocd = Math.max(0, bytes.length - 65557);
     let eocdOffset = -1;
+
     for (let i = bytes.length - 22; i >= minEocd; i -= 1) {
-      if (
-        bytes[i] === 0x50 &&
-        bytes[i + 1] === 0x4b &&
-        bytes[i + 2] === 0x05 &&
-        bytes[i + 3] === 0x06
-      ) {
+      if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) {
         eocdOffset = i;
         break;
       }
@@ -106,8 +125,7 @@
 
     let ptr = cdOffset;
     while (ptr + 46 <= cdEnd) {
-      const sig = readUint32LE(bytes, ptr);
-      if (sig !== 0x02014b50) break;
+      if (readUint32LE(bytes, ptr) !== 0x02014b50) break;
 
       const method = readUint16LE(bytes, ptr + 10);
       const compSize = readUint32LE(bytes, ptr + 20);
@@ -133,8 +151,7 @@
         entries.set(fileName, compSlice);
       } else if (method === 8) {
         try {
-          const out = await inflateBytes(compSlice, 'deflate-raw');
-          entries.set(fileName, out);
+          entries.set(fileName, await inflateBytes(compSlice, 'deflate-raw'));
         } catch (_) {
           // Skip unreadable compressed entry
         }
@@ -142,6 +159,10 @@
     }
     return entries;
   }
+
+  /* ========================================================================
+   * Office / Spreadsheet / Document Parsers (XLSX, ODS, DOCX, HTML, XML, RTF)
+   * ======================================================================== */
 
   function colRefToIndex(ref) {
     const letters = String(ref || '').replace(/[^A-Za-z]/g, '').toUpperCase();
@@ -156,16 +177,9 @@
     if (!xml) return [];
     const strings = [];
     const siRx = /<si\b[^>]*>([\s\S]*?)<\/si>/gi;
-    let m;
-    while ((m = siRx.exec(xml)) !== null) {
-      const inner = m[1];
-      const parts = [];
-      const tRx = /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
-      let tm;
-      while ((tm = tRx.exec(inner)) !== null) {
-        parts.push(decodeXmlEntities(tm[1]));
-      }
-      strings.push(parts.join(''));
+    let match;
+    while ((match = siRx.exec(xml)) !== null) {
+      strings.push(extractJoinedTagText(match[1], 't'));
     }
     return strings;
   }
@@ -187,13 +201,7 @@
 
         let val = '';
         if (type === 'inlineStr') {
-          const parts = [];
-          const tRx = /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
-          let tm;
-          while ((tm = tRx.exec(body)) !== null) {
-            parts.push(decodeXmlEntities(tm[1]));
-          }
-          val = parts.join('');
+          val = extractJoinedTagText(body, 't');
         } else {
           const vm = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i);
           const rawV = vm ? decodeXmlEntities(vm[1]) : '';
@@ -230,8 +238,7 @@
       });
 
     for (const sName of sheetNames) {
-      const sheetXml = decodeBytes(entries.get(sName));
-      const rows = parseXlsxSheet(sheetXml, sharedStrings);
+      const rows = parseXlsxSheet(decodeBytes(entries.get(sName)), sharedStrings);
       if (rows.length >= 2 || (rows.length === 1 && rows[0].length > 1)) {
         return rows;
       }
@@ -245,6 +252,7 @@
     const rows = [];
     const rowRx = /<table:table-row\b([^>]*)>([\s\S]*?)<\/table:table-row>/gi;
     let rm;
+
     while ((rm = rowRx.exec(scope)) !== null) {
       const rowCells = [];
       const cellRx = /<table:table-cell\b([^>]*)(?:\/>|>([\s\S]*?)<\/table:table-cell>)/gi;
@@ -277,60 +285,39 @@
     return rows;
   }
 
+  function extractDocxParagraphLines(xml) {
+    const lines = [];
+    const pRx = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/gi;
+    let pm;
+    while ((pm = pRx.exec(xml)) !== null) {
+      const pText = extractJoinedTagText(pm[1], 'w:t').trim();
+      if (pText) lines.push(pText);
+    }
+    return lines;
+  }
+
   function parseDocxDocument(xml) {
     const tblRx = /<w:tbl\b[^>]*>([\s\S]*?)<\/w:tbl>/gi;
-    const rows = [];
     let tm;
     while ((tm = tblRx.exec(xml)) !== null) {
       const trRx = /<w:tr\b[^>]*>([\s\S]*?)<\/w:tr>/gi;
-      let trm;
       const tblRows = [];
+      let trm;
       while ((trm = trRx.exec(tm[1])) !== null) {
         const cells = [];
         const tcRx = /<w:tc\b[^>]*>([\s\S]*?)<\/w:tc>/gi;
         let tcm;
         while ((tcm = tcRx.exec(trm[1])) !== null) {
-          const pParts = [];
-          const pRx = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/gi;
-          let pm;
-          while ((pm = pRx.exec(tcm[1])) !== null) {
-            const tParts = [];
-            const wtRx = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi;
-            let wtm;
-            while ((wtm = wtRx.exec(pm[1])) !== null) {
-              tParts.push(decodeXmlEntities(wtm[1]));
-            }
-            const pText = tParts.join('').trim();
-            if (pText) pParts.push(pText);
-          }
-          cells.push(pParts.join(' ').trim());
+          cells.push(extractDocxParagraphLines(tcm[1]).join(' ').trim());
         }
         if (cells.some((c) => c !== '')) {
           tblRows.push(cells);
         }
       }
-      if (tblRows.length > 0) {
-        rows.push(...tblRows);
-        break;
-      }
+      if (tblRows.length > 0) return tblRows;
     }
 
-    if (rows.length > 0) return rows;
-
-    // Fallback: paragraphs as delimited/table text lines
-    const lines = [];
-    const pRx = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/gi;
-    let pm;
-    while ((pm = pRx.exec(xml)) !== null) {
-      const tParts = [];
-      const wtRx = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi;
-      let wtm;
-      while ((wtm = wtRx.exec(pm[1])) !== null) {
-        tParts.push(decodeXmlEntities(wtm[1]));
-      }
-      const line = tParts.join('').trim();
-      if (line) lines.push(line);
-    }
+    const lines = extractDocxParagraphLines(xml);
     return lines.length > 0 ? parseTextToMatrix(lines.join('\n')) : [];
   }
 
@@ -386,7 +373,6 @@
 
   function parseRtf(rtfText) {
     let text = String(rtfText || '');
-    // Strip binary/header destination groups like fonttbl, colortbl, stylesheet, info
     text = text.replace(/\{\\\*(?:[^{}]|\{[^{}]*\})*\}/g, '');
     text = text.replace(/\{\\(?:fonttbl|colortbl|stylesheet|info|pict|object)(?:[^{}]|\{[^{}]*\})*\}/g, '');
     text = text
@@ -406,6 +392,10 @@
     return parseTextToMatrix(text);
   }
 
+  /* ========================================================================
+   * PDF Text Stream Extractor
+   * ======================================================================== */
+
   function decodePdfLiteralString(raw) {
     let out = '';
     for (let i = 0; i < raw.length; i += 1) {
@@ -417,22 +407,15 @@
       i += 1;
       if (i >= raw.length) break;
       const esc = raw[i];
-      if (esc === 'n') out += '\n';
-      else if (esc === 'r') out += '\r';
-      else if (esc === 't') out += '\t';
-      else if (esc === 'b') out += '\b';
-      else if (esc === 'f') out += '\f';
-      else if (esc === '(' || esc === ')' || esc === '\\') out += esc;
-      else if (esc === '\r' && raw[i + 1] === '\n') i += 1;
-      else if (esc === '\n' || esc === '\r') {
+      if (Object.prototype.hasOwnProperty.call(PDF_ESCAPE_MAP, esc)) {
+        out += PDF_ESCAPE_MAP[esc];
+      } else if (esc === '\r' && raw[i + 1] === '\n') {
+        i += 1;
+      } else if (esc === '\n' || esc === '\r') {
         // Line continuation
       } else if (/[0-7]/.test(esc)) {
         let oct = esc;
-        if (/[0-7]/.test(raw[i + 1] || '')) {
-          i += 1;
-          oct += raw[i];
-        }
-        if (/[0-7]/.test(raw[i + 1] || '')) {
+        for (let k = 0; k < 2 && /[0-7]/.test(raw[i + 1] || ''); k += 1) {
           i += 1;
           oct += raw[i];
         }
@@ -448,14 +431,13 @@
     const clean = String(hex || '').replace(/\s+/g, '');
     if (!clean) return '';
     const padded = clean.length % 2 === 1 ? `${clean}0` : clean;
+    let out = '';
     if (padded.toUpperCase().startsWith('FEFF')) {
-      let out = '';
       for (let i = 4; i + 3 < padded.length; i += 4) {
         out += String.fromCharCode(parseInt(padded.slice(i, i + 4), 16));
       }
       return out;
     }
-    let out = '';
     for (let i = 0; i + 1 < padded.length; i += 2) {
       const code = parseInt(padded.slice(i, i + 2), 16);
       if (code >= 32 || code === 9 || code === 10 || code === 13) {
@@ -468,6 +450,9 @@
   function extractPdfTextTokensFromStream(streamText) {
     const tokens = [];
     const btRx = /BT\b([\s\S]*?)ET\b/g;
+    const opRx =
+      /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|(-?\d+(?:\.\d+)?)\s+TL\b|T\*|(\((?:\\.|[^\\()])*\))\s*(?:Tj|'|")|<([0-9a-fA-F\s]+)>\s*(?:Tj|'|")|\[((?:[^\[\]]|\((?:\\.|[^\\()])*\))*)\]\s*TJ/g;
+
     let bm;
     while ((bm = btRx.exec(streamText)) !== null) {
       const block = bm[1];
@@ -475,9 +460,7 @@
       let y = 0;
       let leading = 12;
 
-      const opRx =
-        /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|(-?\d+(?:\.\d+)?)\s+TL\b|T\*|(\((?:\\.|[^\\()])*\))\s*(?:Tj|'|")|<([0-9a-fA-F\s]+)>\s*(?:Tj|'|")|\[((?:[^\[\]]|\((?:\\.|[^\\()])*\))*)\]\s*TJ/g;
-
+      opRx.lastIndex = 0;
       let om;
       while ((om = opRx.exec(block)) !== null) {
         if (om[5] !== undefined && om[6] !== undefined) {
@@ -491,17 +474,16 @@
         } else if (om[0] === 'T*') {
           y -= leading;
         } else if (om[10] !== undefined) {
-          const str = decodePdfLiteralString(om[10].slice(1, -1));
-          if (str.trim()) tokens.push({ x, y, text: str.trim() });
+          const str = decodePdfLiteralString(om[10].slice(1, -1)).trim();
+          if (str) tokens.push({ x, y, text: str });
         } else if (om[11] !== undefined) {
-          const str = decodePdfHexString(om[11]);
-          if (str.trim()) tokens.push({ x, y, text: str.trim() });
+          const str = decodePdfHexString(om[11]).trim();
+          if (str) tokens.push({ x, y, text: str });
         } else if (om[12] !== undefined) {
-          const arrInner = om[12];
           let joined = '';
           const partRx = /\((?:\\.|[^\\()])*\)|<([0-9a-fA-F\s]+)>|(-?\d+(?:\.\d+)?)/g;
           let pm;
-          while ((pm = partRx.exec(arrInner)) !== null) {
+          while ((pm = partRx.exec(om[12])) !== null) {
             if (pm[0].startsWith('(')) {
               joined += decodePdfLiteralString(pm[0].slice(1, -1));
             } else if (pm[1] !== undefined) {
@@ -532,21 +514,14 @@
 
     lines.forEach((l) => l.items.sort((a, b) => a.x - b.x));
 
-    // Check if lines are already delimited text (CSV/TSV/pipe lines inside PDF)
-    const plainLines = lines
-      .map((l) => l.items.map((i) => i.text).join(' ').trim())
-      .filter(Boolean);
-    if (plainLines.length >= 2) {
-      const sample = plainLines.slice(0, 5).join('\n');
-      if (/[,\t;|]/.test(sample)) {
-        const textMatrix = parseTextToMatrix(plainLines.join('\n'));
-        if (textMatrix.length >= 2 && textMatrix[0].length >= 2) {
-          return textMatrix;
-        }
+    const plainLines = lines.map((l) => l.items.map((i) => i.text).join(' ').trim()).filter(Boolean);
+    if (plainLines.length >= 2 && /[,\t;|]/.test(plainLines.slice(0, 5).join('\n'))) {
+      const textMatrix = parseTextToMatrix(plainLines.join('\n'));
+      if (textMatrix.length >= 2 && textMatrix[0].length >= 2) {
+        return textMatrix;
       }
     }
 
-    // Reconstruct columns by x-coordinate clustering across lines
     const multiTokenLines = lines.filter((l) => l.items.length >= 2);
     if (multiTokenLines.length === 0) {
       return plainLines.map((l) => [l]);
@@ -555,8 +530,7 @@
     const colAnchors = [];
     multiTokenLines.forEach((l) => {
       l.items.forEach((item) => {
-        const existing = colAnchors.find((ax) => Math.abs(ax - item.x) <= 18);
-        if (existing === undefined) {
+        if (colAnchors.every((ax) => Math.abs(ax - item.x) > 18)) {
           colAnchors.push(item.x);
         }
       });
@@ -589,23 +563,22 @@
     const allTokens = [];
     const streamRx = /stream\r?\n([\s\S]*?)\r?\n?endstream/g;
     let sm;
+
     while ((sm = streamRx.exec(latin1)) !== null) {
       const startIdx = sm.index + sm[0].indexOf(sm[1]);
       const rawSlice = bytes.subarray(startIdx, startIdx + sm[1].length);
 
       let streamStr = '';
-      if (sm[1].includes('BT') && sm[1].includes('Tj')) {
+      if (sm[1].includes('BT') && (sm[1].includes('Tj') || sm[1].includes('TJ'))) {
         streamStr = sm[1];
       } else {
-        try {
-          const inflated = await inflateBytes(rawSlice, 'deflate');
-          streamStr = new TextDecoder('latin1').decode(inflated);
-        } catch (_) {
+        for (const fmt of ['deflate', 'deflate-raw']) {
           try {
-            const inflatedRaw = await inflateBytes(rawSlice, 'deflate-raw');
-            streamStr = new TextDecoder('latin1').decode(inflatedRaw);
-          } catch (__) {
-            // Non-zlib or non-text stream (e.g., font/image)
+            const inflated = await inflateBytes(rawSlice, fmt);
+            streamStr = new TextDecoder('latin1').decode(inflated);
+            break;
+          } catch (_) {
+            // Try next decompression format or skip non-text stream
           }
         }
       }
@@ -616,12 +589,15 @@
     }
 
     if (allTokens.length === 0) {
-      // Fallback: uncompressed text operators directly in file
       allTokens.push(...extractPdfTextTokensFromStream(latin1));
     }
 
     return pdfTokensToMatrix(allTokens);
   }
+
+  /* ========================================================================
+   * Text Formats (JSON, Markdown, Delimited) & Dataset Normalization
+   * ======================================================================== */
 
   function parseMarkdownTable(text) {
     const lines = String(text || '')
@@ -636,8 +612,11 @@
     const rows = [];
     for (const line of lines) {
       if (isSepLine(line)) continue;
-      const trimmed = line.replace(/^\|/, '').replace(/\|$/, '');
-      const cells = trimmed.split('|').map((c) => c.trim());
+      const cells = line
+        .replace(/^\|/, '')
+        .replace(/\|$/, '')
+        .split('|')
+        .map((c) => c.trim());
       if (cells.some((c) => c !== '')) rows.push(cells);
     }
     return rows.length > 0 ? rows : null;
@@ -649,7 +628,7 @@
     if (Array.isArray(parsed)) {
       list = parsed;
     } else if (parsed && typeof parsed === 'object') {
-      for (const key of ['records', 'data', 'rows', 'items', 'results']) {
+      for (const key of JSON_COLLECTION_KEYS) {
         if (Array.isArray(parsed[key])) {
           list = parsed[key];
           break;
@@ -684,8 +663,7 @@
         headers.map((h) => {
           const val = item[h];
           if (val === undefined || val === null) return '';
-          if (typeof val === 'object') return JSON.stringify(val);
-          return String(val).trim();
+          return typeof val === 'object' ? JSON.stringify(val) : String(val).trim();
         })
       );
     }
@@ -696,7 +674,6 @@
     const clean = String(rawText || '').replace(/^\uFEFF/, '').trim();
     if (!clean) return [];
 
-    // Try JSON
     if (clean.startsWith('[') || clean.startsWith('{')) {
       try {
         const jsonRows = parseJsonToMatrix(clean);
@@ -706,23 +683,19 @@
       }
     }
 
-    // Try HTML table
     if (/<table\b/i.test(clean)) {
       const htmlRows = parseHtmlTable(clean);
       if (htmlRows.length > 0) return htmlRows;
     }
 
-    // Try Excel XML
     if (/<Row\b/i.test(clean) && /<Cell\b/i.test(clean)) {
       const xmlRows = parseSpreadsheetMlXml(clean);
       if (xmlRows.length > 0) return xmlRows;
     }
 
-    // Try Markdown table
     const mdRows = parseMarkdownTable(clean);
     if (mdRows && mdRows.length > 0) return mdRows;
 
-    // Delimited text (auto-detect comma, semicolon, tab, or pipe)
     const firstLines = clean.split(/\r?\n/).filter((l) => l.trim()).slice(0, 5).join('\n');
     if (CSVParser && typeof CSVParser.parseCSVRows === 'function') {
       const pipeCount = (firstLines.match(/\|/g) || []).length;
@@ -742,20 +715,36 @@
   }
 
   function extractBinaryOle2Fallback(bytes) {
-    // Extract readable UTF-16LE and ASCII text runs from legacy binary .doc/.xls
     const ascii = new TextDecoder('latin1').decode(bytes);
     const utf16 = new TextDecoder('utf-16le').decode(bytes);
     const pickLines = (str) =>
       str
         .split(/[\r\n]+/)
         .map((l) => l.replace(/[^\x20-\x7E\t]/g, '').trim())
-        .filter((l) => l.length >= 3 && /[a-zA-Z0-9]/.test(l) && (l.includes('\t') || l.includes(',') || l.includes(';') || l.includes('|')));
+        .filter((l) => l.length >= 3 && /[a-zA-Z0-9]/.test(l) && /[\t,;|]/.test(l));
 
     const utf16Lines = pickLines(utf16);
     if (utf16Lines.length >= 2) return parseTextToMatrix(utf16Lines.join('\n'));
     const asciiLines = pickLines(ascii);
     if (asciiLines.length >= 2) return parseTextToMatrix(asciiLines.join('\n'));
     return [];
+  }
+
+  function deduplicateColumns(rawHeaders) {
+    if (CSVParser && typeof CSVParser.deduplicateHeaders === 'function') {
+      return CSVParser.deduplicateHeaders(rawHeaders);
+    }
+    const seen = new Map();
+    return rawHeaders.map((h, idx) => {
+      const base = String(h || '').trim() || `column_${idx + 1}`;
+      const count = seen.get(base) || 0;
+      seen.set(base, count + 1);
+      return count === 0 ? base : `${base}_${count + 1}`;
+    });
+  }
+
+  function emptyResult(warning) {
+    return { headers: [], idColumn: '', records: [], indexById: {}, warnings: [warning] };
   }
 
   function matrixToDataset(rawMatrix) {
@@ -768,24 +757,11 @@
       .filter((row) => row.some((c) => c !== ''));
 
     if (matrix.length === 0) {
-      return {
-        headers: [],
-        idColumn: '',
-        records: [],
-        indexById: {},
-        warnings: ['No tabular rows found in the selected file.'],
-      };
+      return emptyResult(PARSER_MESSAGES.NO_ROWS);
     }
 
-    // Skip single-cell title banner row if row 1 has >= 2 columns
-    let headerIdx = 0;
-    if (
-      matrix.length >= 3 &&
-      matrix[0].filter(Boolean).length === 1 &&
-      matrix[1].filter(Boolean).length >= 2
-    ) {
-      headerIdx = 1;
-    }
+    const headerIdx =
+      matrix.length >= 3 && matrix[0].filter(Boolean).length === 1 && matrix[1].filter(Boolean).length >= 2 ? 1 : 0;
 
     const rawHeaderRow = matrix[headerIdx];
     const maxCols = matrix.slice(headerIdx).reduce((m, r) => Math.max(m, r.length), rawHeaderRow.length);
@@ -794,16 +770,10 @@
       paddedHeaders.push(rawHeaderRow[i] || `column_${i + 1}`);
     }
 
-    // Deduplicate headers cleanly
-    const seen = new Map();
-    const headers = paddedHeaders.map((h) => {
-      const count = seen.get(h) || 0;
-      seen.set(h, count + 1);
-      return count === 0 ? h : `${h}_${count + 1}`;
-    });
-
+    const headers = deduplicateColumns(paddedHeaders);
     const idColumn = CSVParser ? CSVParser.detectIdColumn(headers) : headers[0];
     const records = [];
+
     for (let r = headerIdx + 1; r < matrix.length; r += 1) {
       const rowValues = matrix[r];
       const record = {};
@@ -813,10 +783,7 @@
       records.push(record);
     }
 
-    const indexResult = CSVParser
-      ? CSVParser.buildIndex(records, idColumn)
-      : { indexById: {}, warnings: [] };
-
+    const indexResult = CSVParser ? CSVParser.buildIndex(records, idColumn) : { indexById: {}, warnings: [] };
     return {
       headers,
       idColumn,
@@ -826,34 +793,19 @@
     };
   }
 
+  /* ========================================================================
+   * Entry Points
+   * ======================================================================== */
+
   async function parseArrayBuffer(arrayBuffer, fileName) {
     const bytes = new Uint8Array(arrayBuffer || new ArrayBuffer(0));
     if (bytes.length === 0) {
-      return { headers: [], idColumn: '', records: [], indexById: {}, warnings: ['File is empty.'] };
+      return emptyResult(PARSER_MESSAGES.EMPTY_FILE);
     }
 
     const lowerName = String(fileName || '').toLowerCase();
-    const isZip =
-      bytes.length >= 4 &&
-      bytes[0] === 0x50 &&
-      bytes[1] === 0x4b &&
-      bytes[2] === 0x03 &&
-      bytes[3] === 0x04;
-    const isPdf =
-      bytes.length >= 5 &&
-      bytes[0] === 0x25 &&
-      bytes[1] === 0x50 &&
-      bytes[2] === 0x44 &&
-      bytes[3] === 0x46 &&
-      bytes[4] === 0x2d;
-    const isOle2 =
-      bytes.length >= 4 &&
-      bytes[0] === 0xd0 &&
-      bytes[1] === 0xcf &&
-      bytes[2] === 0x11 &&
-      bytes[3] === 0xe0;
 
-    if (isZip) {
+    if (startsWithSignature(bytes, FILE_SIGNATURES.ZIP)) {
       const entries = await extractZipEntries(bytes);
       if (entries.has('xl/workbook.xml') || Array.from(entries.keys()).some((k) => k.startsWith('xl/worksheets/'))) {
         return matrixToDataset(parseXlsxFromEntries(entries));
@@ -866,30 +818,18 @@
       }
     }
 
-    if (isPdf || lowerName.endsWith('.pdf')) {
+    if (startsWithSignature(bytes, FILE_SIGNATURES.PDF) || lowerName.endsWith('.pdf')) {
       const pdfRows = await parsePdfBytes(bytes);
       if (pdfRows.length === 0) {
-        return {
-          headers: [],
-          idColumn: '',
-          records: [],
-          indexById: {},
-          warnings: ['No extractable text table found in this PDF (it may be scanned or encrypted).'],
-        };
+        return emptyResult(PARSER_MESSAGES.PDF_EMPTY);
       }
       return matrixToDataset(pdfRows);
     }
 
-    if (isOle2) {
+    if (startsWithSignature(bytes, FILE_SIGNATURES.OLE2)) {
       const oleRows = extractBinaryOle2Fallback(bytes);
       if (oleRows.length === 0) {
-        return {
-          headers: [],
-          idColumn: '',
-          records: [],
-          indexById: {},
-          warnings: ['Legacy binary .doc/.xls could not be parsed as a table. Please save as .docx, .xlsx, or .csv.'],
-        };
+        return emptyResult(PARSER_MESSAGES.OLE2_UNSUPPORTED);
       }
       return matrixToDataset(oleRows);
     }
@@ -904,12 +844,10 @@
 
   async function importFile(file) {
     if (!file) {
-      return { headers: [], idColumn: '', records: [], indexById: {}, warnings: ['No file provided.'] };
+      return emptyResult(PARSER_MESSAGES.NO_FILE);
     }
     const buffer =
-      typeof file.arrayBuffer === 'function'
-        ? await file.arrayBuffer()
-        : await new Response(file).arrayBuffer();
+      typeof file.arrayBuffer === 'function' ? await file.arrayBuffer() : await new Response(file).arrayBuffer();
     return parseArrayBuffer(buffer, file.name || 'uploaded');
   }
 
